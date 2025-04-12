@@ -1,0 +1,90 @@
+[project]
+name = "uringloop"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "cffi>=1.17.1",
+    "setuptools>=78.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bright2227/uringloop"
+
+[dependency-groups]
+dev = [
+    "mdformat>=0.7.22",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=0.26.0",
+    "ruff>=0.11.4",
+    "twine>=6.1.0",
+]
+
+## ruff
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".ipynb_checkpoints",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pyenv",
+    ".pytest_cache",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    ".vscode",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "site-packages",
+    "venv",
+]
+
+line-length = 128
+indent-width = 4
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = false
+docstring-code-line-length = "dynamic"
+
+[tool.ruff.lint.isort]
+case-sensitive = true
+combine-as-imports = true
+force-sort-within-sections = true
+known-first-party = []
+known-third-party = []
+lines-after-imports = 2
+order-by-type = true
+
+# setuptools
+[build-system]
+requires = ["setuptools>=78", "cffi>=1.17.1", "wheel"]
+build-backend = "setuptools.build_meta"
+package-dir = {"" = "."}
+
+[tool.setuptools]
+packages = ["uringloop"]
+include-package-data = true
+py-modules = ["ffi"]
