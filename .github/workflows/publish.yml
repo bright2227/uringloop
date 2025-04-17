@@ -16,18 +16,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive  # Initializes and fetches submodules
+          fetch-depth: 0         # Needed for submodule hashes
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          submodules: recursive  # Initializes and fetches submodules
-          fetch-depth: 0         # Needed for submodule hashes
 
       - name: Install the liburing
         run: |
           cd libs
           ./configure
           make
+          sudo make install
 
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v5
@@ -36,11 +38,12 @@ jobs:
           enable-cache: true
 
       - name: Build release distributions
-        run: uv build -v --no-binary
-
+        run: |
+          uv sync --group dev
+          uv build -v --sdist
       - name: Upload distributions
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}  #
         run:  |
-          python3 -m twine upload --repository testpypi dist/*
+          uv run twine upload --verbose --repository testpypi dist/*
