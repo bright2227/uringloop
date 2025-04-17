@@ -20,6 +20,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          submodules: recursive  # Initializes and fetches submodules
+          fetch-depth: 0         # Needed for submodule hashes
+
+      - name: Install the liburing
+        run: |
+          cd libs
+          ./configure
+          make
 
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v5
