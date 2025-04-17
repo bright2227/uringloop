@@ -3,6 +3,9 @@ name: Upload Package (testing)
 on:
   release:
     types: [published]
+  pull_request:
+    branches:
+      - '*'
 
 permissions:
   contents: read
@@ -17,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          
+
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v5
         with:
