@@ -91,6 +91,19 @@ async def init_proactor() -> AsyncGenerator[IoUringProactor, None]:
             await asyncio.sleep(0.1)
 
     task = loop.create_task(_run_proactor_task())
+
+    def stop_all_coro_if_raise_exception(task: asyncio.Task[None]):
+        if task.exception():  # If task failed
+            # Cancel all other tasks
+            for t in asyncio.all_tasks(loop):
+                if t != task and not t.done():
+                    t.cancel()
+
+            loop.run_until_complete(loop.shutdown_asyncgens())
+
+    # Add failure callback
+    task.add_done_callback(stop_all_coro_if_raise_exception)
+
     yield proactor
 
     # Cleanup
