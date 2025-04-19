@@ -27,8 +27,16 @@ A Python implementation of a liburing-based proactor event loop for asyncio, des
 
 ## Installation
 
+- Using uv:
+
 ```bash
 uv add uringloop
+```
+
+- Using pip:
+
+```bash
+pip install uringloop
 ```
 
 ## Quick Start
