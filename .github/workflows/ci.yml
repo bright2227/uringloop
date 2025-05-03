@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Prepare environment
+        uses: ./.github/actions/prepare
+
+      - name: Lint
+        run: uv run ruff check uringloop tests
+
+      - name: Run tests
+        run: uv run pytest tests/ -v

@@ -1,0 +1,78 @@
+name: "Prepare Build Environment"
+description: "Checkout, cache, build liburing, and install Python deps"
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Get system info and liburing commit hash
+      id: cache-info
+      shell: bash
+      run: |
+        echo "sysinfo=$(uname -a | md5sum | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+        echo "liburing_hash=$(cd libs && git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Cache Python dependencies
+      id: cache-python
+      uses: actions/cache@v3
+      with:
+        path: |
+          .venv
+          ~/.cache/uv
+        key: ${{ runner.os }}-py-${{ hashFiles('uv.lock') }}
+
+    - name: Cache liburing build
+      id: cache-liburing
+      uses: actions/cache@v3
+      with:
+        path: libs/
+        key: ${{ steps.cache-info.outputs.os }}-${{ steps.cache-info.outputs.arch }}-liburing-${{ steps.cache-info.outputs.liburing_hash }}
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Build liburing (if cache miss)
+      if: steps.cache-liburing.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cd libs
+        ./configure
+        make
+
+    - name: Save liburing cache
+      if: steps.cache-liburing.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v3
+      with:
+        path: libs/
+        key: ${{ steps.cache-info.outputs.os }}-${{ steps.cache-info.outputs.arch }}-liburing-${{ steps.cache-info.outputs.liburing_hash }}
+
+    - name: Install liburing (always)
+      shell: bash
+      run: |
+        cd libs
+        sudo make install
+
+    - name: Install UV
+      uses: astral-sh/setup-uv@v5
+      with:
+        version: "0.6.2"
+        enable-cache: true
+
+    - name: Install Python dependencies (if cache miss)
+      if: steps.cache-python.outputs.cache-hit != 'true'
+      shell: bash
+      run: uv sync --group dev
+
+    - name: Save Python dependencies cache
+      if: steps.cache-python.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v3
+      with:
+        path: |
+          .venv
+          ~/.cache/uv
+        key: ${{ runner.os }}-py-${{ hashFiles('uv.lock') }}
