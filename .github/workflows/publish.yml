@@ -10,33 +10,18 @@ permissions:
 jobs:
   release-build:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repo
+        uses: actions/checkout@v4
         with:
-          submodules: recursive  # Initializes and fetches submodules
-          fetch-depth: 0         # Needed for submodule hashes
+          submodules: recursive
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install the liburing
-        run: |
-          cd libs
-          ./configure
-          make
-          sudo make install
-
-      - name: Install the latest version of uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          version: "0.6.2"
-          enable-cache: true
+      - name: Prepare environment
+        uses: ./.github/actions/prepare
 
       - name: Build release distributions
         run: |
-          uv sync --group dev
           uv build -v --sdist
 
       - name: Upload distributions
