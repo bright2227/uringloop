@@ -139,7 +139,6 @@ This project is licensed under the terms of the MIT license.
 
 ## TODO
 
-- workflow
 - use registered fd and buffer
 - add signal handling
 - refactor e2e test
