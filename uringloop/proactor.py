@@ -2,6 +2,7 @@ from asyncio import events, futures
 from collections.abc import Buffer
 import errno
 from io import BufferedReader, IOBase
+import itertools
 import os
 import socket
 import time
@@ -16,6 +17,7 @@ from uringloop.lib import (
     ConnectKwargs,
     IoUring,
     IoUringCqe,
+    KeepAlive,
     PollAddKwargs,
     ReadKwargs,
     RecvFromKwargs,
@@ -72,7 +74,8 @@ from uringloop.operation import (
 )
 
 
-ProatorCache: TypeAlias = dict[int, tuple[BaseOperation, "_IoUringFuture | None"]]
+# user_data -> (operation, future, kernel-referenced cdata kept alive until the CQE)
+ProatorCache: TypeAlias = dict[int, tuple[BaseOperation, "_IoUringFuture | None", KeepAlive]]
 
 
 DEFAULT_ENTRIES = 16
@@ -103,123 +106,112 @@ class _ProactorSubmit:
     def __init__(self, ring: IoUring, cache: ProatorCache) -> None:
         self._iouring = ring
         self._cache: ProatorCache = cache
-        self._unsubmit_user_datas: list[int] = []
+        self._unsubmitted: list[tuple[int, KeepAlive]] = []
 
-    def recv(self, kwargs: RecvKwargs, flags: int = 0) -> Self:
+    def recv(self, kwargs: RecvKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_recv(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_recv(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def read(self, kwargs: ReadKwargs, flags: int = 0) -> Self:
+    def read(self, kwargs: ReadKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_read(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_read(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def recvfrom(self, kwargs: RecvFromKwargs, flags: int = 0) -> Self:
+    def recvfrom(self, kwargs: RecvFromKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_recvfrom(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_recvfrom(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def sendto(self, kwargs: SendToKwargs, flags: int = 0) -> Self:
+    def sendto(self, kwargs: SendToKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_sendto(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_sendto(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def send(self, kwargs: SendKwargs, flags: int = 0) -> Self:
+    def send(self, kwargs: SendKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_send(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_send(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def write(self, kwargs: WriteKwargs, flags: int = 0) -> Self:
+    def write(self, kwargs: WriteKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_write(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_write(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def accept(self, kwargs: AcceptKwargs, flags: int = 0) -> Self:
+    def accept(self, kwargs: AcceptKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_accept(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_accept(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def connect(self, kwargs: ConnectKwargs, flags: int = 0) -> Self:
+    def connect(self, kwargs: ConnectKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_connect(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_connect(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def splice(self, kwargs: SpliceKwargs, flags: int = 0) -> Self:
+    def splice(self, kwargs: SpliceKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_splice(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_splice(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def cancel(self, kwargs: Cancel64Kwargs, flags: int = 0) -> Self:
+    def cancel(self, kwargs: Cancel64Kwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_cancel64(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_cancel64(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
-    def poll_add(self, kwargs: PollAddKwargs, flags: int = 0) -> Self:
+    def poll_add(self, kwargs: PollAddKwargs, user_data: int, flags: int = 0) -> Self:
         sqe = io_uring_get_sqe(self._iouring)
-        io_uring_prep_poll_add(sqe, **kwargs)
-        user_data = id(kwargs)
+        resources = io_uring_prep_poll_add(sqe, **kwargs)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmit_user_datas.append(user_data)
+        self._unsubmitted.append((user_data, resources))
         return self
 
     def submit(self, op: BaseOperation, fut: _IoUringFuture | None):
-        for user_data in self._unsubmit_user_datas:
-            self._cache[user_data] = (op, fut)
+        for user_data, resources in self._unsubmitted:
+            self._cache[user_data] = (op, fut, resources)
         io_uring_submit(self._iouring)
-        self._unsubmit_user_datas = []
+        self._unsubmitted = []
 
 
 class IoUringProactor:
@@ -235,6 +227,13 @@ class IoUringProactor:
         self._cache: ProatorCache = {}
         self._stopped_serving: WeakSet[Any] = weakref.WeakSet()
         self.submitter = _ProactorSubmit(self._iouring, self._cache)
+        # unique per-operation key for the SQE user_data field; an object id()
+        # must not be used here because CPython reuses addresses of freed
+        # objects, which would collide with still-inflight operations
+        self._user_data_counter = itertools.count(1)
+
+    def _next_user_data(self) -> int:
+        return next(self._user_data_counter)
 
     def _check_closed(self):
         if self._iouring is None:
@@ -255,54 +254,52 @@ class IoUringProactor:
 
     def recv(self, conn: socket.socket | IOBase, nbytes: int, flags: int = 0) -> futures.Future[bytes]:
         buf = bytearray(nbytes)
+        user_data = self._next_user_data()
         if isinstance(conn, socket.socket):
             kwargs = RecvKwargs(sock=conn, buffer=buf, flags=flags)
-            user_data = id(kwargs)
             op = RecvOperation(sock=conn, buffer=buf, flags=flags, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
-            self.submitter.recv(kwargs).submit(op=op, fut=fut)
+            self.submitter.recv(kwargs, user_data).submit(op=op, fut=fut)
             return fut
         else:
             kwargs = ReadKwargs(file=conn, buffer=buf, offset=0)
-            user_data = id(kwargs)
             op = ReadOperation(file=conn, buffer=buf, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
-            self.submitter.read(kwargs).submit(op=op, fut=fut)
+            self.submitter.read(kwargs, user_data).submit(op=op, fut=fut)
             return fut
 
     def recv_into(self, conn: socket.socket | IOBase, buf: Buffer, flags: int = 0) -> futures.Future[int]:
+        user_data = self._next_user_data()
         if isinstance(conn, socket.socket):
             kwargs = RecvKwargs(sock=conn, buffer=buf, flags=flags)
-            user_data = id(kwargs)
             op = RecvIntoOperation(sock=conn, buffer=buf, flags=flags, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
-            self.submitter.recv(kwargs).submit(op=op, fut=fut)
+            self.submitter.recv(kwargs, user_data).submit(op=op, fut=fut)
             return fut
         else:
             kwargs = ReadKwargs(file=conn, buffer=buf, offset=0)
-            user_data = id(kwargs)
             op = ReadIntoOperation(file=conn, buffer=buf, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
-            self.submitter.read(kwargs).submit(op=op, fut=fut)
+            self.submitter.read(kwargs, user_data).submit(op=op, fut=fut)
             return fut
 
     def recvfrom(self, conn: socket.socket, nbytes: int, flags: int = 0) -> futures.Future[tuple[bytes, pyAddress]]:
         buf = bytearray(nbytes)
         sockaddr = new_writable_sockaddr(conn.family)
         kwargs = RecvFromKwargs(sock=conn, buffer=buf, sockaddr=sockaddr, msghdr_flags=0, flags=flags)
-        user_data = id(kwargs)
+        user_data = self._next_user_data()
         op = RecvFromOperation(sock=conn, buffer=buf, sockaddr=sockaddr, flags=flags, user_data=user_data)
         fut = _IoUringFuture(self, op, loop=self._loop)
-        self.submitter.recvfrom(kwargs).submit(op=op, fut=fut)
+        self.submitter.recvfrom(kwargs, user_data).submit(op=op, fut=fut)
         return fut
 
     def recvfrom_into(self, conn: socket.socket, buf: Buffer, flags: int = 0) -> futures.Future[tuple[int, pyAddress]]:
         sockaddr = new_writable_sockaddr(conn.family)
         kwargs = RecvFromKwargs(sock=conn, buffer=buf, sockaddr=sockaddr, msghdr_flags=0, flags=flags)
-        user_data = id(kwargs)
+        user_data = self._next_user_data()
         op = RecvFromIntoOperation(sock=conn, buffer=buf, sockaddr=sockaddr, flags=flags, user_data=user_data)
         fut = _IoUringFuture(self, op, loop=self._loop)
-        self.submitter.recvfrom(kwargs).submit(op=op, fut=fut)
+        self.submitter.recvfrom(kwargs, user_data).submit(op=op, fut=fut)
         return fut
 
     def sendto(self, conn: socket.socket, buf: Buffer, flags: int = 0, addr: pyAddress | None = None) -> futures.Future[int]:
@@ -310,46 +307,45 @@ class IoUringProactor:
         if addr:
             sockaddr = new_readable_sockaddr(conn.family, addr)
         kwargs = SendToKwargs(sock=conn, buffer=buf, sockaddr=sockaddr, flags=flags, msghdr_flags=0)
-        user_data = id(kwargs)
+        user_data = self._next_user_data()
         op = SendToOperation(sock=conn, buffer=buf, sockaddr=sockaddr, flags=flags, user_data=user_data)
         fut = _IoUringFuture(self, op, loop=self._loop)
-        self.submitter.sendto(kwargs).submit(op=op, fut=fut)
+        self.submitter.sendto(kwargs, user_data).submit(op=op, fut=fut)
         return fut
 
     def send(self, conn: socket.socket | IOBase, buf: Buffer, flags: int = 0) -> futures.Future[int]:
         buf_view = memoryview(buf)
+        user_data = self._next_user_data()
         if isinstance(conn, socket.socket):
             kwargs = SendKwargs(sock=conn, buffer=buf_view, flags=flags)
-            user_data = id(kwargs)
             op = SendOperation(sock=conn, buffer=buf_view, flags=flags, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
-            self.submitter.send(kwargs).submit(op=op, fut=fut)
+            self.submitter.send(kwargs, user_data).submit(op=op, fut=fut)
             return fut
         else:
             kwargs = WriteKwargs(file=conn, buffer=buf_view, offset=0)
-            user_data = id(kwargs)
             op = WriteOperation(file=conn, buffer=buf_view, offset=0, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
-            self.submitter.write(kwargs).submit(op=op, fut=fut)
+            self.submitter.write(kwargs, user_data).submit(op=op, fut=fut)
             return fut
 
     def accept(self, listener: socket.socket) -> futures.Future[tuple[socket.socket, pyAddress]]:
         flags = 0
         sockaddr = new_writable_sockaddr(listener.family)
         kwargs = AcceptKwargs(sock=listener, sockaddr=sockaddr, flags=flags)
-        user_data = id(kwargs)
+        user_data = self._next_user_data()
         op = AcceptOperation(sock=listener, sockaddr=sockaddr, flags=flags, user_data=user_data)
         fut = _IoUringFuture(self, op, loop=self._loop)
-        self.submitter.accept(kwargs).submit(op=op, fut=fut)
+        self.submitter.accept(kwargs, user_data).submit(op=op, fut=fut)
         return fut
 
     def connect(self, conn: socket.socket, address: pyAddress) -> futures.Future[None]:
         addr = new_readable_sockaddr(family=conn.family, address=address)
         kwargs = ConnectKwargs(sock=conn, sockaddr=addr)
-        user_data = id(kwargs)
+        user_data = self._next_user_data()
         op = ConnectOperation(sock=conn, sockaddr=addr, user_data=user_data)
         fut = _IoUringFuture(self, op, loop=self._loop)
-        self.submitter.connect(kwargs).submit(op=op, fut=fut)
+        self.submitter.connect(kwargs, user_data).submit(op=op, fut=fut)
         return fut
 
     def sendfile(self, sock: socket.socket, file: BufferedReader, offset: int, count: int) -> futures.Future[int]:
@@ -357,9 +353,9 @@ class IoUringProactor:
         pipe_r, pipe_w = os.pipe()
 
         f2p_kwargs = SpliceKwargs(file_in=file, off_in=offset, file_out=pipe_w, off_out=-1, nbytes=count, splice_flags=0)
-        f2p_user_data = id(f2p_kwargs)
+        f2p_user_data = self._next_user_data()
         p2s_kwargs = SpliceKwargs(file_in=pipe_r, off_in=-1, file_out=sock, off_out=-1, nbytes=count, splice_flags=0)
-        p2s_user_data = id(p2s_kwargs)
+        p2s_user_data = self._next_user_data()
         op = SendfileOperation(
             sock=sock,
             file=file,
@@ -372,23 +368,25 @@ class IoUringProactor:
             p2s_user_data=p2s_user_data,
         )
         fut = _IoUringFuture(self, op, loop=self._loop)
-        self.submitter.splice(f2p_kwargs, flags=IOSQE_IO_HARDLINK).splice(p2s_kwargs).submit(op=op, fut=fut)
+        self.submitter.splice(f2p_kwargs, f2p_user_data, flags=IOSQE_IO_HARDLINK).splice(p2s_kwargs, p2s_user_data).submit(
+            op=op, fut=fut
+        )
         return fut
 
     def cancel_operation(self, operation: BaseOperation, flags: int = 0):
-        user_data = operation.get_user_data()
-        if not user_data:
+        target_user_data = operation.get_user_data()
+        if not target_user_data:
             return
-        kwargs = Cancel64Kwargs(user_data=user_data, flags=flags)
-        self.submitter.cancel(kwargs).submit(operation, None)
+        kwargs = Cancel64Kwargs(user_data=target_user_data, flags=flags)
+        self.submitter.cancel(kwargs, self._next_user_data()).submit(operation, None)
 
     def poll_add(self, file: socket.socket | IOBase | int, poll_mask: int) -> futures.Future[int]:
         kwargs = PollAddKwargs(file=file, poll_mask=poll_mask)
-        user_data = id(kwargs)
+        user_data = self._next_user_data()
 
         op = PollAddOperation(file=file, poll_mask=poll_mask, user_data=user_data)
         fut = _IoUringFuture(self, op, loop=self._loop)
-        self.submitter.poll_add(kwargs).submit(op=op, fut=fut)
+        self.submitter.poll_add(kwargs, user_data).submit(op=op, fut=fut)
         return fut
 
     def _poll(self, timeout: float | None = None):
@@ -424,13 +422,13 @@ class IoUringProactor:
 
     def _stop_serving(self, obj: Any):
         self._stopped_serving.add(obj)
-        for op, fut in self._cache.values():
+        for op, fut, _ in self._cache.values():
             if op.get_file_obj() in self._stopped_serving and fut and not fut.done():
                 fut.cancel()
 
     def _handle_cqe(self, cqe: IoUringCqe):
         try:
-            op, fut = self._cache.pop(cqe.user_data)
+            op, fut, _ = self._cache.pop(cqe.user_data)
             # TODO: consider if there is more cqe with the same user_data, e.g. multishot.
         except KeyError:
             if self._loop is not None and self._loop.get_debug():
@@ -477,7 +475,7 @@ class IoUringProactor:
             return
 
         # Cancel remaining registered operations.
-        for _, fut in list(self._cache.values()):
+        for _, fut, _ in list(self._cache.values()):
             if not fut:
                 # Nothing to do with cancelled futures
                 continue

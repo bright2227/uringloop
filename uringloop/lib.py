@@ -19,6 +19,10 @@ SockaddrUn = Any
 SocklenT = Any
 Sockaddr = SockaddrIn | SockaddrIn6 | SockaddrUn
 pyAddress: TypeAlias = tuple[Any, ...] | str | Buffer
+# cdata objects the kernel reads from or writes into asynchronously; the caller
+# must hold a reference to them until the operation's CQE has been consumed,
+# otherwise CFFI frees the memory and the kernel touches freed memory.
+KeepAlive: TypeAlias = tuple[Any, ...]
 
 
 IOSQE_FIXED_FILE: int = lib.IOSQE_FIXED_FILE
@@ -255,7 +259,7 @@ def new_kernel_timespec(tv_sec: int = 0, tv_nsec: int = 0) -> KernelTimespec:
     return ts
 
 
-def new_iovec(buf: Annotated[Buffer, "writable/immwritable"]) -> Annotated[Iovec, "writable/immwritable"]:
+def new_iovec(buf: Annotated[Buffer, "writable/immwritable"]) -> tuple[Annotated[Iovec, "writable/immwritable"], Any]:
     """
     Create and initialize a struct iovec.
 
@@ -263,12 +267,15 @@ def new_iovec(buf: Annotated[Buffer, "writable/immwritable"]) -> Annotated[Iovec
         buf (Buffer)
 
     Returns:
-        A pointer to the initialized struct iovec.
+        A tuple (iovec, iov_base): assigning into iov.iov_base does not keep the
+        from_buffer cdata alive, so it is returned alongside and must be kept
+        referenced as long as the iovec is in use.
     """
     iov = ffi.new("struct iovec *")
-    iov.iov_base = ffi.from_buffer(buf)  # type: ignore[reportAttributeAccessIssue]
-    iov.iov_len = len(buf)  # type: ignore[reportAttributeAccessIssue]
-    return iov
+    iov_base = ffi.from_buffer(buf)
+    iov.iov_base = iov_base  # type: ignore[reportAttributeAccessIssue]
+    iov.iov_len = len(memoryview(buf))  # type: ignore[reportAttributeAccessIssue]
+    return iov, iov_base
 
 
 def get_sockaddr_size(family: socket.AddressFamily) -> int:
@@ -333,79 +340,92 @@ def io_uring_get_sqe(ring: IoUring) -> IoUringSqe:
     return lib.io_uring_get_sqe(ring)
 
 
-def io_uring_prep_send(sqe: IoUringSqe, **kwargs: Unpack[SendKwargs]) -> None:
+def io_uring_prep_send(sqe: IoUringSqe, **kwargs: Unpack[SendKwargs]) -> KeepAlive:
     sock = kwargs["sock"]
     buffer = kwargs["buffer"]
     flags = kwargs["flags"]
 
-    lib.io_uring_prep_send(sqe, sock.fileno(), ffi.from_buffer(buffer), len(buffer), flags)  # type: ignore[reportAttributeAccessIssue]
+    buf = ffi.from_buffer(buffer)
+    lib.io_uring_prep_send(sqe, sock.fileno(), buf, len(memoryview(buffer)), flags)
+    return (buf,)
 
 
-def io_uring_prep_recv(sqe: IoUringSqe, **kwargs: Unpack[RecvKwargs]) -> None:
+def io_uring_prep_recv(sqe: IoUringSqe, **kwargs: Unpack[RecvKwargs]) -> KeepAlive:
     sock = kwargs["sock"]
     buffer = kwargs["buffer"]
     flags = kwargs["flags"]
 
-    lib.io_uring_prep_recv(sqe, sock.fileno(), ffi.from_buffer(buffer), len(buffer), flags)  # type: ignore[reportAttributeAccessIssue]
+    buf = ffi.from_buffer(buffer)
+    lib.io_uring_prep_recv(sqe, sock.fileno(), buf, len(memoryview(buffer)), flags)
+    return (buf,)
 
 
-def io_uring_prep_write(sqe: IoUringSqe, **kwargs: Unpack[WriteKwargs]) -> None:
+def io_uring_prep_write(sqe: IoUringSqe, **kwargs: Unpack[WriteKwargs]) -> KeepAlive:
     file = kwargs["file"]
     buffer = kwargs["buffer"]
     offset = kwargs["offset"]
 
-    lib.io_uring_prep_write(sqe, file.fileno(), ffi.from_buffer(buffer), len(buffer), offset)  # type: ignore[reportAttributeAccessIssue]
+    buf = ffi.from_buffer(buffer)
+    lib.io_uring_prep_write(sqe, file.fileno(), buf, len(memoryview(buffer)), offset)
+    return (buf,)
 
 
-def io_uring_prep_read(sqe: IoUringSqe, **kwargs: Unpack[ReadKwargs]) -> None:
+def io_uring_prep_read(sqe: IoUringSqe, **kwargs: Unpack[ReadKwargs]) -> KeepAlive:
     file = kwargs["file"]
     buffer = kwargs["buffer"]
     offset = kwargs["offset"]
 
-    lib.io_uring_prep_read(sqe, file.fileno(), ffi.from_buffer(buffer), len(buffer), offset)  # type: ignore[reportAttributeAccessIssue]
+    buf = ffi.from_buffer(buffer)
+    lib.io_uring_prep_read(sqe, file.fileno(), buf, len(memoryview(buffer)), offset)
+    return (buf,)
 
 
-def io_uring_prep_accept(sqe: IoUringSqe, **kwargs: Unpack[AcceptKwargs]) -> None:
+def io_uring_prep_accept(sqe: IoUringSqe, **kwargs: Unpack[AcceptKwargs]) -> KeepAlive:
     sock = kwargs["sock"]
     sockaddr = kwargs["sockaddr"]
     flags = kwargs["flags"]
-    addrlen = new_socklen_t(sock.family)
-    addrlen_ptr = ffi.new("socklen_t *addrlen")
-    addrlen_ptr[0] = addrlen
+    # the kernel writes the peer address length into *addrlen_ptr at completion
+    # time, so it must stay alive until the CQE is consumed
+    addrlen_ptr = ffi.new("socklen_t *")
+    addrlen_ptr[0] = get_sockaddr_size(sock.family)
 
     lib.io_uring_prep_accept(sqe, sock.fileno(), ffi.cast("struct sockaddr *", sockaddr), addrlen_ptr, flags)
+    return (sockaddr, addrlen_ptr)
 
 
-def io_uring_prep_connect(sqe: IoUringSqe, **kwargs: Unpack[ConnectKwargs]) -> None:
+def io_uring_prep_connect(sqe: IoUringSqe, **kwargs: Unpack[ConnectKwargs]) -> KeepAlive:
     sock = kwargs["sock"]
     sockaddr = kwargs["sockaddr"]
     addrlen = new_socklen_t(sock.family)
 
     lib.io_uring_prep_connect(sqe, sock.fileno(), ffi.cast("struct sockaddr *", sockaddr), addrlen)
+    return (sockaddr,)
 
 
-def io_uring_prep_poll_add(sqe: IoUringSqe, **kwargs: Unpack[PollAddKwargs]) -> None:
+def io_uring_prep_poll_add(sqe: IoUringSqe, **kwargs: Unpack[PollAddKwargs]) -> KeepAlive:
     file = kwargs["file"]
     poll_mask = kwargs["poll_mask"]
     fd = file if isinstance(file, int) else file.fileno()
     lib.io_uring_prep_poll_add(sqe, fd, poll_mask)
+    return ()
 
 
-def io_uring_prep_cancel64(sqe: IoUringSqe, **kwargs: Unpack[Cancel64Kwargs]) -> None:
+def io_uring_prep_cancel64(sqe: IoUringSqe, **kwargs: Unpack[Cancel64Kwargs]) -> KeepAlive:
     user_data = kwargs["user_data"]
     flags = kwargs["flags"]
     lib.io_uring_prep_cancel64(sqe, user_data, flags)
+    return ()
 
 
 #  TODO: update as  io_uring_prep_sendmsg
-def io_uring_prep_sendto(sqe: IoUringSqe, **kwargs: Unpack[SendToKwargs]) -> None:
+def io_uring_prep_sendto(sqe: IoUringSqe, **kwargs: Unpack[SendToKwargs]) -> KeepAlive:
     sock = kwargs["sock"]
     buffer = kwargs["buffer"]
     flags = kwargs["flags"]
     sockaddr = kwargs["sockaddr"]
     msghdr_flags = kwargs["msghdr_flags"]
 
-    iov = new_iovec(buf=buffer)
+    iov, iov_base = new_iovec(buf=buffer)
     msghdr = ffi.new("struct msghdr *")
 
     msghdr.msg_iov = iov  # type: ignore[reportAttributeAccessIssue]
@@ -423,17 +443,18 @@ def io_uring_prep_sendto(sqe: IoUringSqe, **kwargs: Unpack[SendToKwargs]) -> Non
         msghdr.msg_namelen = get_sockaddr_size(sock.family)  # type: ignore[reportAttributeAccessIssue]
 
     lib.io_uring_prep_sendmsg(sqe, sock.fileno(), msghdr, flags)
+    return (msghdr, iov, iov_base, sockaddr)
 
 
 #  TODO: update as  io_uring_prep_recvfrom
-def io_uring_prep_recvfrom(sqe: IoUringSqe, **kwargs: Unpack[RecvFromKwargs]) -> None:
+def io_uring_prep_recvfrom(sqe: IoUringSqe, **kwargs: Unpack[RecvFromKwargs]) -> KeepAlive:
     sock = kwargs["sock"]
     buf = kwargs["buffer"]
     sockaddr = kwargs["sockaddr"]
     msghdr_flags = kwargs["msghdr_flags"]
     flags = kwargs["flags"]
 
-    iov = new_iovec(buf=buf)
+    iov, iov_base = new_iovec(buf=buf)
     msghdr = ffi.new("struct msghdr *")
 
     msghdr.msg_iov = iov  # type: ignore[reportAttributeAccessIssue]
@@ -447,9 +468,10 @@ def io_uring_prep_recvfrom(sqe: IoUringSqe, **kwargs: Unpack[RecvFromKwargs]) ->
     msghdr.msg_namelen = get_sockaddr_size(sock.family)  # type: ignore[reportAttributeAccessIssue]
 
     lib.io_uring_prep_recvmsg(sqe, sock.fileno(), msghdr, flags)
+    return (msghdr, iov, iov_base, sockaddr)
 
 
-def io_uring_prep_splice(sqe: IoUringSqe, **kwargs: Unpack[SpliceKwargs]) -> None:
+def io_uring_prep_splice(sqe: IoUringSqe, **kwargs: Unpack[SpliceKwargs]) -> KeepAlive:
     file_in = kwargs["file_in"]
     off_in = kwargs["off_in"]
     file_out = kwargs["file_out"]
@@ -468,6 +490,7 @@ def io_uring_prep_splice(sqe: IoUringSqe, **kwargs: Unpack[SpliceKwargs]) -> Non
         nbytes,
         splice_flags,
     )
+    return ()
 
 
 def io_uring_sqe_set_data64(sqe: IoUringSqe, data: int) -> None:
