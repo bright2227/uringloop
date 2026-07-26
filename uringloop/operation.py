@@ -11,7 +11,7 @@ from uringloop.lib import parse_addr
 
 
 if TYPE_CHECKING:
-    from proactor import _IoUringFuture  # type: ignore[reportPrivateUsage]
+    from uringloop.proactor import _IoUringFuture  # type: ignore[reportPrivateUsage]
 
 
 @dataclass(slots=True)

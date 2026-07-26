@@ -67,6 +67,11 @@ POLLHUP: int = lib.POLLHUP
 POLLNVAL: int = lib.POLLNVAL
 
 
+# -1 as an unsigned __u64: read/write at the file's current position
+# (kernel 5.16+); pipes and sockets ignore the offset either way
+OFFSET_CURRENT_POS: int = 0xFFFF_FFFF_FFFF_FFFF
+
+
 # Structure creation functions
 def new_io_uring() -> IoUring:
     return ffi.new("struct io_uring *")
@@ -275,15 +280,22 @@ def new_readable_sockaddr(family: socket.AddressFamily, address: pyAddress) -> A
 
 # Function wrappers with type annotations
 def io_uring_queue_init(entries: int, ring: IoUring, flags: int = 0) -> int:
-    return lib.io_uring_queue_init(entries, ring, flags)
+    res = lib.io_uring_queue_init(entries, ring, flags)
+    if res < 0:
+        raise OSError(-res, os.strerror(-res))
+    return res
 
 
 def io_uring_queue_exit(ring: IoUring) -> int:
     return lib.io_uring_queue_exit(ring)
 
 
-def io_uring_get_sqe(ring: IoUring) -> IoUringSqe:
-    return lib.io_uring_get_sqe(ring)
+def io_uring_get_sqe(ring: IoUring) -> IoUringSqe | None:
+    """Returns None when the submission queue is full."""
+    sqe = lib.io_uring_get_sqe(ring)
+    if sqe == ffi.NULL:
+        return None
+    return sqe
 
 
 def io_uring_prep_send(sqe: IoUringSqe, request: SendRequest) -> None:
