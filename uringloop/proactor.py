@@ -1,5 +1,5 @@
 from asyncio import events, futures
-from collections.abc import Buffer
+from collections.abc import Buffer, Callable
 from dataclasses import dataclass
 import errno
 from io import BufferedReader, IOBase
@@ -136,104 +136,53 @@ class _ProactorSubmit:
         if io_uring_sq_space_left(self._iouring) < count:
             raise RuntimeError(f"io_uring submission queue cannot fit {count} linked entries")
 
-    def recv(self, request: RecvRequest, user_data: int, flags: int = 0) -> Self:
+    def _prep(
+        self,
+        prep_fn: Callable[[Any, Any], None],
+        request: KernelRequest,
+        user_data: int,
+        flags: int,
+    ) -> Self:
         sqe = self._get_sqe()
-        io_uring_prep_recv(sqe, request)
+        prep_fn(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
             io_uring_sqe_set_flags(sqe, flags)
         self._unsubmitted.append((user_data, request))
         return self
+
+    def recv(self, request: RecvRequest, user_data: int, flags: int = 0) -> Self:
+        return self._prep(io_uring_prep_recv, request, user_data, flags)
 
     def read(self, request: ReadRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_read(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_read, request, user_data, flags)
 
     def recvfrom(self, request: RecvFromRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_recvfrom(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_recvfrom, request, user_data, flags)
 
     def sendto(self, request: SendToRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_sendto(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_sendto, request, user_data, flags)
 
     def send(self, request: SendRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_send(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_send, request, user_data, flags)
 
     def write(self, request: WriteRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_write(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_write, request, user_data, flags)
 
     def accept(self, request: AcceptRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_accept(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_accept, request, user_data, flags)
 
     def connect(self, request: ConnectRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_connect(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_connect, request, user_data, flags)
 
     def splice(self, request: SpliceRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_splice(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_splice, request, user_data, flags)
 
     def cancel(self, request: Cancel64Request, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_cancel64(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_cancel64, request, user_data, flags)
 
     def poll_add(self, request: PollAddRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = self._get_sqe()
-        io_uring_prep_poll_add(sqe, request)
-        io_uring_sqe_set_data64(sqe, user_data)
-        if flags:
-            io_uring_sqe_set_flags(sqe, flags)
-        self._unsubmitted.append((user_data, request))
-        return self
+        return self._prep(io_uring_prep_poll_add, request, user_data, flags)
 
     def submit(self, op: BaseOperation, fut: _IoUringFuture | None):
         """Register the prepared SQEs; the syscall is deferred to flush().
