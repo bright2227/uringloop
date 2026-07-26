@@ -8,7 +8,7 @@ from uringloop.proactor import IoUringProactor
 
 
 @pytest.mark.asyncio
-async def test_tcp_conmmunication(
+async def test_tcp_communication(
     init_proactor: IoUringProactor, client_tcp_sock: socket.socket, server_tcp_sock: socket.socket
 ) -> None:
     """Integration test using real socket communication with the echo server."""

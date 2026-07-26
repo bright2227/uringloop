@@ -84,7 +84,7 @@ class PendingCompletion:
     request: KernelRequest
 
 
-ProatorCache: TypeAlias = dict[int, PendingCompletion]
+ProactorCache: TypeAlias = dict[int, PendingCompletion]
 
 
 DEFAULT_ENTRIES = 256
@@ -112,9 +112,9 @@ class _IoUringFuture(futures.Future[Any]):
 
 
 class _ProactorSubmit:
-    def __init__(self, ring: IoUring, cache: ProatorCache) -> None:
+    def __init__(self, ring: IoUring, cache: ProactorCache) -> None:
         self._iouring = ring
-        self._cache: ProatorCache = cache
+        self._cache: ProactorCache = cache
         self._unsubmitted: list[tuple[int, KernelRequest]] = []
         self._pending_submit = False
 
@@ -221,7 +221,7 @@ class IoUringProactor:
         io_uring_queue_init(entries, ring, flags)
 
         self._iouring = ring
-        self._cache: ProatorCache = {}
+        self._cache: ProactorCache = {}
         self._stopped_serving: WeakSet[Any] = weakref.WeakSet()
         self.submitter = _ProactorSubmit(self._iouring, self._cache)
         # unique per-operation key for the SQE user_data field; an object id()
@@ -244,10 +244,7 @@ class IoUringProactor:
             self._poll(timeout)
         tmp = self._results
         self._results = []
-        try:
-            return tmp
-        finally:
-            tmp = None
+        return tmp
 
     def recv(self, conn: socket.socket | IOBase, nbytes: int, flags: int = 0) -> futures.Future[bytes]:
         buf = bytearray(nbytes)
@@ -481,7 +478,7 @@ class IoUringProactor:
             op.mark_seen(cqe.user_data)
             # TODO: figure out the correct way to _stopped_serving, may be io_uring_prep_cancel_fd?
             if op.get_file_obj() in self._stopped_serving:
-                # the self.cancel_operation woulbe be triggered
+                # the self.cancel_operation would be triggered
                 # if the user_data is seen, the op.get_user_data would not appeared
                 fut.cancel()
             else:

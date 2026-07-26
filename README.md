@@ -9,7 +9,7 @@ A Python implementation of a liburing-based proactor event loop for asyncio, des
 
 ## Goals
 
-- Provide a primarily Python (with CFFI, maybe C extention in future) implementation of a liburing-based event loop
+- Provide a primarily Python (with CFFI, maybe C extension in future) implementation of a liburing-based event loop
 - Maintain full compatibility with standard asyncio APIs
 - Follow Python standard library implementation patterns
 
@@ -46,7 +46,7 @@ Pass the loop factory to `asyncio.run` to use the io_uring-based event loop:
 ```python
 import asyncio
 
-from uringloop import IouringProactorEventLoop
+from uringloop import IoUringProactorEventLoop
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -110,7 +110,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main(), loop_factory=IouringProactorEventLoop)
+    asyncio.run(main(), loop_factory=IoUringProactorEventLoop)
 
 ```
 
@@ -131,9 +131,9 @@ An event loop policy is also available for code that still uses the (deprecated 
 ```python
 import asyncio
 
-from uringloop import IouringProactorEventLoopPolicy
+from uringloop import IoUringProactorEventLoopPolicy
 
-asyncio.set_event_loop_policy(IouringProactorEventLoopPolicy())
+asyncio.set_event_loop_policy(IoUringProactorEventLoopPolicy())
 asyncio.run(main())
 ```
 

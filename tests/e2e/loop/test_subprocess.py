@@ -3,13 +3,13 @@ from typing import Any
 
 import pytest
 
-from uringloop.loop import IouringProactorEventLoop, _IouringWritePipeTransport  # type: ignore[reportPrivateUsage]
+from uringloop.loop import IoUringProactorEventLoop, _IoUringWritePipeTransport  # type: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
 async def test_subprocess_basic():
     event_loop = asyncio.get_running_loop()
-    assert isinstance(event_loop, IouringProactorEventLoop)
+    assert isinstance(event_loop, IoUringProactorEventLoop)
     # Create a protocol class that tracks completion
     class SubprocessProtocol(asyncio.SubprocessProtocol):
         def __init__(self, exit_future: asyncio.Future[Any]):
@@ -37,7 +37,7 @@ async def test_subprocess_basic():
 @pytest.mark.asyncio
 async def test_subprocess_io():
     event_loop = asyncio.get_running_loop()
-    assert isinstance(event_loop, IouringProactorEventLoop)
+    assert isinstance(event_loop, IoUringProactorEventLoop)
     class SubprocessProtocol(asyncio.SubprocessProtocol):
         def __init__(self, exit_future: asyncio.Future[Any]):
             self.exit_future = exit_future
@@ -56,7 +56,7 @@ async def test_subprocess_io():
 
     # Write to stdin and close
     stdin = transport.get_pipe_transport(0)
-    assert isinstance(stdin, _IouringWritePipeTransport), f"stdin got unexpected type {type(stdin)}"
+    assert isinstance(stdin, _IoUringWritePipeTransport), f"stdin got unexpected type {type(stdin)}"
     stdin.write(b"test data\n")
     stdin.close()
 
@@ -70,7 +70,7 @@ async def test_subprocess_io():
 @pytest.mark.asyncio
 async def test_subprocess_error():
     event_loop = asyncio.get_running_loop()
-    assert isinstance(event_loop, IouringProactorEventLoop)
+    assert isinstance(event_loop, IoUringProactorEventLoop)
     class SubprocessProtocol(asyncio.SubprocessProtocol):
         def __init__(self, exit_future: asyncio.Future[Any]):
             self.exit_future = exit_future
