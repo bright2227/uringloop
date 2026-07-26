@@ -19,6 +19,7 @@ async def test_tcp_conmmunication(
     await proactor.connect(client_tcp_sock, address)
     incoming_client_tcp_socket, client_tcp_sock_address = await proactor.accept(server_tcp_sock)
 
+    assert not incoming_client_tcp_socket.get_inheritable()
     assert client_tcp_sock.getsockname() == client_tcp_sock_address
 
     test_messages = [

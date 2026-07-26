@@ -393,8 +393,9 @@ class AcceptOperation(BaseOperation):
         if res < 0:
             fut.set_exception(get_os_error(res))
         else:
-            # TODO make sure new socket flags inheritation
-            sock = socket.fromfd(res, self.sock.family, self.sock.type, self.sock.proto)
+            # socket.fromfd would dup() the fd and leak the original one;
+            # wrap the accepted fd directly instead (same as socket.accept)
+            sock = socket.socket(self.sock.family, self.sock.type, self.sock.proto, fileno=res)
             if socket.getdefaulttimeout() is None and self.sock.gettimeout():
                 sock.setblocking(True)
             fut.set_result((sock, parse_addr(self.sock.family, self.sockaddr)))
@@ -423,6 +424,7 @@ class SendfileOperation(BaseOperation):
     p2s_user_data: int
     f2p_done: bool = False
     p2s_done: bool = False
+    pipes_closed: bool = False
 
     def get_user_data(
         self,
@@ -450,6 +452,12 @@ class SendfileOperation(BaseOperation):
             self.p2s_done = True
         else:
             raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
+        # both linked CQEs have arrived (success, failure or cancellation), so
+        # the kernel no longer references the pipe; release the fds
+        if self.f2p_done and self.p2s_done and not self.pipes_closed:
+            self.pipes_closed = True
+            os.close(self.pipe_r)
+            os.close(self.pipe_w)
 
     def all_seen(self) -> bool:
         return self.p2s_done
