@@ -6,7 +6,8 @@ import os
 import socket
 from typing import TYPE_CHECKING, Annotated, Any
 
-from uringloop.lib import IoUringCqe, Sockaddr, parse_addr
+from uringloop._types import IoUringCqe, Sockaddr
+from uringloop.lib import parse_addr
 
 
 if TYPE_CHECKING:
