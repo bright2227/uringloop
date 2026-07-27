@@ -19,9 +19,8 @@ SockaddrUn = Any
 SocklenT = Any
 Sockaddr = SockaddrIn | SockaddrIn6 | SockaddrUn
 pyAddress: TypeAlias = tuple[Any, ...] | str | Buffer
-# cdata objects the kernel reads from or writes into asynchronously; the caller
-# must hold a reference to them until the operation's CQE has been consumed,
-# otherwise CFFI frees the memory and the kernel touches freed memory.
+# Cdata objects the kernel reads from or writes into asynchronously. The caller
+# must hold a reference to them until the operation's completion is handled.
 KeepAlive: TypeAlias = tuple[Any, ...]
 
 
@@ -259,12 +258,21 @@ def new_kernel_timespec(tv_sec: int = 0, tv_nsec: int = 0) -> KernelTimespec:
     return ts
 
 
-def new_iovec(buf: Annotated[Buffer, "writable/immwritable"]) -> tuple[Annotated[Iovec, "writable/immwritable"], Any]:
+def _export_buffer(buffer: Buffer, *, require_writable: bool = False) -> tuple[Any, int]:
+    cdata = ffi.from_buffer(buffer, require_writable=require_writable)
+    return cdata, ffi.sizeof(cdata)
+
+
+def new_iovec(
+    buf: Annotated[Buffer, "readable/writable"], *, require_writable: bool = False
+) -> tuple[Annotated[Iovec, "readable/writable"], Any]:
     """
     Create and initialize a struct iovec.
 
     Args:
         buf (Buffer)
+        require_writable (bool): Reject read-only buffers when the kernel will
+            write into the iovec.
 
     Returns:
         A tuple (iovec, iov_base): assigning into iov.iov_base does not keep the
@@ -272,9 +280,9 @@ def new_iovec(buf: Annotated[Buffer, "writable/immwritable"]) -> tuple[Annotated
         referenced as long as the iovec is in use.
     """
     iov = ffi.new("struct iovec *")
-    iov_base = ffi.from_buffer(buf)
+    iov_base, nbytes = _export_buffer(buf, require_writable=require_writable)
     iov.iov_base = iov_base  # type: ignore[reportAttributeAccessIssue]
-    iov.iov_len = len(memoryview(buf))  # type: ignore[reportAttributeAccessIssue]
+    iov.iov_len = nbytes  # type: ignore[reportAttributeAccessIssue]
     return iov, iov_base
 
 
@@ -345,8 +353,8 @@ def io_uring_prep_send(sqe: IoUringSqe, **kwargs: Unpack[SendKwargs]) -> KeepAli
     buffer = kwargs["buffer"]
     flags = kwargs["flags"]
 
-    buf = ffi.from_buffer(buffer)
-    lib.io_uring_prep_send(sqe, sock.fileno(), buf, len(memoryview(buffer)), flags)
+    buf, nbytes = _export_buffer(buffer)
+    lib.io_uring_prep_send(sqe, sock.fileno(), buf, nbytes, flags)
     return (buf,)
 
 
@@ -355,8 +363,8 @@ def io_uring_prep_recv(sqe: IoUringSqe, **kwargs: Unpack[RecvKwargs]) -> KeepAli
     buffer = kwargs["buffer"]
     flags = kwargs["flags"]
 
-    buf = ffi.from_buffer(buffer)
-    lib.io_uring_prep_recv(sqe, sock.fileno(), buf, len(memoryview(buffer)), flags)
+    buf, nbytes = _export_buffer(buffer, require_writable=True)
+    lib.io_uring_prep_recv(sqe, sock.fileno(), buf, nbytes, flags)
     return (buf,)
 
 
@@ -365,8 +373,8 @@ def io_uring_prep_write(sqe: IoUringSqe, **kwargs: Unpack[WriteKwargs]) -> KeepA
     buffer = kwargs["buffer"]
     offset = kwargs["offset"]
 
-    buf = ffi.from_buffer(buffer)
-    lib.io_uring_prep_write(sqe, file.fileno(), buf, len(memoryview(buffer)), offset)
+    buf, nbytes = _export_buffer(buffer)
+    lib.io_uring_prep_write(sqe, file.fileno(), buf, nbytes, offset)
     return (buf,)
 
 
@@ -375,8 +383,8 @@ def io_uring_prep_read(sqe: IoUringSqe, **kwargs: Unpack[ReadKwargs]) -> KeepAli
     buffer = kwargs["buffer"]
     offset = kwargs["offset"]
 
-    buf = ffi.from_buffer(buffer)
-    lib.io_uring_prep_read(sqe, file.fileno(), buf, len(memoryview(buffer)), offset)
+    buf, nbytes = _export_buffer(buffer, require_writable=True)
+    lib.io_uring_prep_read(sqe, file.fileno(), buf, nbytes, offset)
     return (buf,)
 
 
@@ -454,7 +462,7 @@ def io_uring_prep_recvfrom(sqe: IoUringSqe, **kwargs: Unpack[RecvFromKwargs]) ->
     msghdr_flags = kwargs["msghdr_flags"]
     flags = kwargs["flags"]
 
-    iov, iov_base = new_iovec(buf=buf)
+    iov, iov_base = new_iovec(buf=buf, require_writable=True)
     msghdr = ffi.new("struct msghdr *")
 
     msghdr.msg_iov = iov  # type: ignore[reportAttributeAccessIssue]
