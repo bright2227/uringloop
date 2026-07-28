@@ -3,6 +3,8 @@ import cffi
 
 ffibuilder = cffi.FFI()
 
+# NOTE: no Py_BEGIN_ALLOW_THREADS wrappers are needed here; CFFI API-mode
+# calls already release the GIL around C function calls.
 source_code = """
     #include <fcntl.h>
     #include <linux/poll.h>
@@ -13,25 +15,7 @@ source_code = """
     #include <sys/uio.h>
     #include <netinet/in.h>
     #include <unistd.h>
-    #include <Python.h>
     #include "liburing.h"
-
-    int io_uring_wait_cqe_nogil(struct io_uring *ring, struct io_uring_cqe **cqe_ptr) {
-        int res;
-        Py_BEGIN_ALLOW_THREADS
-        res = io_uring_wait_cqe(ring, cqe_ptr);
-        Py_END_ALLOW_THREADS
-        return res;
-    }
-
-    int io_uring_wait_cqe_timeout_nogil(struct io_uring *ring, struct io_uring_cqe **cqe_ptr,
-                                       struct __kernel_timespec *ts) {
-        int res;
-        Py_BEGIN_ALLOW_THREADS
-        res = io_uring_wait_cqe_timeout(ring, cqe_ptr, ts);
-        Py_END_ALLOW_THREADS
-        return res;
-    }
     """
 
 
@@ -321,6 +305,8 @@ ffibuilder.cdef("""
     static inline void io_uring_prep_write(struct io_uring_sqe *sqe, int fd, const void *buf, unsigned nbytes, __u64 offset);
 
     struct io_uring_sqe *io_uring_get_sqe(struct io_uring *ring);
+    static inline unsigned io_uring_sq_ready(const struct io_uring *ring);
+    static inline unsigned io_uring_sq_space_left(const struct io_uring *ring);
     static inline void io_uring_sqe_set_data64(struct io_uring_sqe *sqe, __u64 data);
     static inline void io_uring_sqe_set_flags(struct io_uring_sqe *sqe, unsigned flags);
 
@@ -329,9 +315,6 @@ ffibuilder.cdef("""
     static inline int io_uring_wait_cqe(struct io_uring *ring, struct io_uring_cqe **cqe_ptr);
     static inline void io_uring_cqe_seen(struct io_uring *ring, struct io_uring_cqe *cqe);
     int io_uring_wait_cqe_timeout(struct io_uring *ring, struct io_uring_cqe **cqe_ptr, struct __kernel_timespec *ts);
-
-    int io_uring_wait_cqe_nogil(struct io_uring *ring, struct io_uring_cqe **cqe_ptr);
-    int io_uring_wait_cqe_timeout_nogil(struct io_uring *ring, struct io_uring_cqe **cqe_ptr, struct __kernel_timespec *ts);
 """)
 
 # TODO: remove this trick, i feel it is not a official way.

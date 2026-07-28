@@ -430,10 +430,19 @@ def io_uring_cqe_seen(ring: IoUring, cqe: IoUringCqe) -> None:
     lib.io_uring_cqe_seen(ring, cqe)
 
 
-def io_uring_submit(ring: IoUring) -> None:
+def io_uring_submit(ring: IoUring) -> int:
     res = lib.io_uring_submit(ring)
     if res < 0:
         raise OSError(-res, os.strerror(-res))
+    return res
+
+
+def io_uring_sq_ready(ring: IoUring) -> int:
+    return lib.io_uring_sq_ready(ring)
+
+
+def io_uring_sq_space_left(ring: IoUring) -> int:
+    return lib.io_uring_sq_space_left(ring)
 
 
 def io_uring_peek_cqe(ring: IoUring) -> IoUringCqe:

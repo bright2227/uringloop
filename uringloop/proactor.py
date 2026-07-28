@@ -31,6 +31,8 @@ from uringloop.lib import (
     io_uring_prep_write,
     io_uring_queue_exit,
     io_uring_queue_init,
+    io_uring_sq_ready,
+    io_uring_sq_space_left,
     io_uring_sqe_set_data64,
     io_uring_sqe_set_flags,
     io_uring_submit,
@@ -85,7 +87,7 @@ class PendingCompletion:
 ProatorCache: TypeAlias = dict[int, PendingCompletion]
 
 
-DEFAULT_ENTRIES = 16
+DEFAULT_ENTRIES = 256
 
 
 class _IoUringFuture(futures.Future[Any]):
@@ -114,17 +116,25 @@ class _ProactorSubmit:
         self._iouring = ring
         self._cache: ProatorCache = cache
         self._unsubmitted: list[tuple[int, KernelRequest]] = []
+        self._pending_submit = False
 
     def _get_sqe(self) -> Any:
         sqe = io_uring_get_sqe(self._iouring)
         if sqe is None:
             # submission queue is full: flush the prepared SQEs to the kernel
             # to free up slots, then retry
-            io_uring_submit(self._iouring)
+            self.flush()
             sqe = io_uring_get_sqe(self._iouring)
             if sqe is None:
                 raise RuntimeError("io_uring submission queue is full")
         return sqe
+
+    def ensure_capacity(self, count: int) -> None:
+        """Ensure a group of linked SQEs fits in one submission."""
+        if io_uring_sq_space_left(self._iouring) < count:
+            self.flush()
+        if io_uring_sq_space_left(self._iouring) < count:
+            raise RuntimeError(f"io_uring submission queue cannot fit {count} linked entries")
 
     def recv(self, request: RecvRequest, user_data: int, flags: int = 0) -> Self:
         sqe = self._get_sqe()
@@ -226,10 +236,29 @@ class _ProactorSubmit:
         return self
 
     def submit(self, op: BaseOperation, fut: _IoUringFuture | None):
+        """Register the prepared SQEs; the syscall is deferred to flush().
+
+        Batching all SQEs prepared between two polls into one
+        io_uring_submit call is what makes io_uring cheaper than epoll:
+        one io_uring_enter per loop iteration instead of one per operation.
+        """
         for user_data, request in self._unsubmitted:
             self._cache[user_data] = PendingCompletion(op, fut, request)
-        io_uring_submit(self._iouring)
         self._unsubmitted = []
+        self._pending_submit = True
+
+    def flush(self):
+        while self._pending_submit:
+            try:
+                submitted = io_uring_submit(self._iouring)
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                raise
+            if io_uring_sq_ready(self._iouring) == 0:
+                self._pending_submit = False
+            elif submitted == 0:
+                raise RuntimeError("io_uring made no progress submitting queued entries")
 
 
 class IoUringProactor:
@@ -369,6 +398,8 @@ class IoUringProactor:
 
     def sendfile(self, sock: socket.socket, file: BufferedReader, offset: int, count: int) -> futures.Future[int]:
         """NOTE: edge cases would be handled by event loop"""
+        # Linked SQEs cannot cross submission boundaries.
+        self.submitter.ensure_capacity(2)
         pipe_r, pipe_w = os.pipe()
 
         f2p_request = SpliceRequest(
@@ -423,6 +454,10 @@ class IoUringProactor:
         return fut
 
     def _poll(self, timeout: float | None = None):
+        # push every SQE prepared since the last poll to the kernel in a
+        # single syscall before waiting for completions
+        self.submitter.flush()
+
         if timeout is None:
             while True:
                 try:

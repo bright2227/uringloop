@@ -88,7 +88,7 @@ async def init_proactor() -> AsyncGenerator[IoUringProactor, None]:
     async def _run_proactor_task():
         while True:
             proactor._poll(timeout=0.0)  # type: ignore[reportPrivateUsage]
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
 
     task = loop.create_task(_run_proactor_task())
 
