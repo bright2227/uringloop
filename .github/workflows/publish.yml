@@ -10,12 +10,12 @@ permissions:
 jobs:
   release-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
       - name: Prepare environment
         uses: ./.github/actions/prepare
@@ -24,9 +24,11 @@ jobs:
         run: |
           uv build -v --sdist
 
+      # TODO: switch to PyPI Trusted Publishing (OIDC) and drop the token:
+      # https://docs.pypi.org/trusted-publishers/
       - name: Upload distributions
         env:
           TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}  #
-        run:  |
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
           uv run twine upload --verbose --repository pypi dist/*
