@@ -336,7 +336,7 @@ class IoUringProactor:
             return fut
 
     def accept(self, listener: socket.socket) -> futures.Future[tuple[socket.socket, pyAddress]]:
-        flags = 0
+        flags = socket.SOCK_CLOEXEC
         sockaddr = new_writable_sockaddr(listener.family)
         request = AcceptRequest(sock=listener, sockaddr=sockaddr, flags=flags)
         user_data = self._next_user_data()
