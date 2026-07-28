@@ -14,6 +14,7 @@ from weakref import WeakSet
 from uringloop._types import IoUring, IoUringCqe, Sockaddr, pyAddress
 from uringloop.lib import (
     IOSQE_IO_HARDLINK,
+    OFFSET_CURRENT_POS,
     io_uring_cqe_seen,
     io_uring_get_sqe,
     io_uring_peek_cqe,
@@ -114,8 +115,19 @@ class _ProactorSubmit:
         self._cache: ProatorCache = cache
         self._unsubmitted: list[tuple[int, KernelRequest]] = []
 
-    def recv(self, request: RecvRequest, user_data: int, flags: int = 0) -> Self:
+    def _get_sqe(self) -> Any:
         sqe = io_uring_get_sqe(self._iouring)
+        if sqe is None:
+            # submission queue is full: flush the prepared SQEs to the kernel
+            # to free up slots, then retry
+            io_uring_submit(self._iouring)
+            sqe = io_uring_get_sqe(self._iouring)
+            if sqe is None:
+                raise RuntimeError("io_uring submission queue is full")
+        return sqe
+
+    def recv(self, request: RecvRequest, user_data: int, flags: int = 0) -> Self:
+        sqe = self._get_sqe()
         io_uring_prep_recv(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -124,7 +136,7 @@ class _ProactorSubmit:
         return self
 
     def read(self, request: ReadRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_read(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -133,7 +145,7 @@ class _ProactorSubmit:
         return self
 
     def recvfrom(self, request: RecvFromRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_recvfrom(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -142,7 +154,7 @@ class _ProactorSubmit:
         return self
 
     def sendto(self, request: SendToRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_sendto(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -151,7 +163,7 @@ class _ProactorSubmit:
         return self
 
     def send(self, request: SendRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_send(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -160,7 +172,7 @@ class _ProactorSubmit:
         return self
 
     def write(self, request: WriteRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_write(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -169,7 +181,7 @@ class _ProactorSubmit:
         return self
 
     def accept(self, request: AcceptRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_accept(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -178,7 +190,7 @@ class _ProactorSubmit:
         return self
 
     def connect(self, request: ConnectRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_connect(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -187,7 +199,7 @@ class _ProactorSubmit:
         return self
 
     def splice(self, request: SpliceRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_splice(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -196,7 +208,7 @@ class _ProactorSubmit:
         return self
 
     def cancel(self, request: Cancel64Request, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_cancel64(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -205,7 +217,7 @@ class _ProactorSubmit:
         return self
 
     def poll_add(self, request: PollAddRequest, user_data: int, flags: int = 0) -> Self:
-        sqe = io_uring_get_sqe(self._iouring)
+        sqe = self._get_sqe()
         io_uring_prep_poll_add(sqe, request)
         io_uring_sqe_set_data64(sqe, user_data)
         if flags:
@@ -226,6 +238,7 @@ class IoUringProactor:
     def __init__(self, entries: int = DEFAULT_ENTRIES, flags: int = 0):
         self._loop: events.AbstractEventLoop | None = None
         self._results: list[futures.Future[Any]] = []
+        self._iouring: IoUring | None = None
         ring = new_io_uring()
         io_uring_queue_init(entries, ring, flags)
 
@@ -268,7 +281,7 @@ class IoUringProactor:
             self.submitter.recv(request, user_data).submit(op=op, fut=fut)
             return fut
         else:
-            request = ReadRequest(file=conn, buffer=buf, offset=0)
+            request = ReadRequest(file=conn, buffer=buf, offset=OFFSET_CURRENT_POS)
             op = ReadOperation(file=conn, buffer=buf, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
             self.submitter.read(request, user_data).submit(op=op, fut=fut)
@@ -283,7 +296,7 @@ class IoUringProactor:
             self.submitter.recv(request, user_data).submit(op=op, fut=fut)
             return fut
         else:
-            request = ReadRequest(file=conn, buffer=buf, offset=0)
+            request = ReadRequest(file=conn, buffer=buf, offset=OFFSET_CURRENT_POS)
             op = ReadIntoOperation(file=conn, buffer=buf, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
             self.submitter.read(request, user_data).submit(op=op, fut=fut)
@@ -329,8 +342,8 @@ class IoUringProactor:
             self.submitter.send(request, user_data).submit(op=op, fut=fut)
             return fut
         else:
-            request = WriteRequest(file=conn, buffer=buf_view, offset=0)
-            op = WriteOperation(file=conn, buffer=buf_view, offset=0, user_data=user_data)
+            request = WriteRequest(file=conn, buffer=buf_view, offset=OFFSET_CURRENT_POS)
+            op = WriteOperation(file=conn, buffer=buf_view, offset=OFFSET_CURRENT_POS, user_data=user_data)
             fut = _IoUringFuture(self, op, loop=self._loop)
             self.submitter.write(request, user_data).submit(op=op, fut=fut)
             return fut
@@ -411,7 +424,16 @@ class IoUringProactor:
 
     def _poll(self, timeout: float | None = None):
         if timeout is None:
-            cqe = io_uring_wait_cqe(self._iouring)
+            while True:
+                try:
+                    cqe = io_uring_wait_cqe(self._iouring)
+                    break
+                except OSError as e:
+                    # interrupted by a signal: retry; a raised signal handler
+                    # exception (e.g. KeyboardInterrupt) still propagates
+                    if e.errno == errno.EINTR:
+                        continue
+                    raise
             self._handle_cqe(cqe)
             io_uring_cqe_seen(self._iouring, cqe)
 
@@ -423,9 +445,11 @@ class IoUringProactor:
             try:
                 cqe = io_uring_wait_cqe_timeout(self._iouring, ktspec)
             except OSError as e:
-                if e.errno == errno.ETIME:
+                # treat a signal interruption like a timeout: the event loop
+                # recalculates the timeout and calls select again
+                if e.errno in (errno.ETIME, errno.EINTR):
                     return
-                raise e
+                raise
             self._handle_cqe(cqe)
             io_uring_cqe_seen(self._iouring, cqe)
 
@@ -442,7 +466,9 @@ class IoUringProactor:
 
     def _stop_serving(self, obj: Any):
         self._stopped_serving.add(obj)
-        for pending in self._cache.values():
+        # iterate over a copy: fut.cancel() submits a cancel SQE, which
+        # registers a new cache entry and would break dict iteration
+        for pending in list(self._cache.values()):
             op = pending.operation
             fut = pending.future
             if op.get_file_obj() in self._stopped_serving and fut and not fut.done():
@@ -478,7 +504,7 @@ class IoUringProactor:
                 self._run_operation(cqe, op, fut)
         # if fut is None, it means it from cancelation
         elif cqe.res < 0:
-            if self._loop is None or cqe.res == -2 and op.all_seen():
+            if self._loop is None or cqe.res == -errno.ENOENT and op.all_seen():
                 # if  target cqe completed before the cancelation, ignores the cancelation "not found"
                 # TODO: if the cancelation cqe returns earlier than target cqe, avoid it shows error message.
                 return

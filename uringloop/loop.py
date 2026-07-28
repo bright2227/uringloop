@@ -24,7 +24,7 @@ class _IouringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport
             # the transport has been closed
             return
         poll_mask = fut.result()
-        assert (poll_mask | POLLHUP) or (poll_mask | POLLERR)
+        assert poll_mask & (POLLHUP | POLLERR)
         if self._closing:
             assert self._read_fut is None
             return
@@ -40,6 +40,9 @@ class IouringProactorEventLoop(proactor_events.BaseProactorEventLoop):
     """Linux version of proactor event loop using Iouring."""
 
     def __init__(self, proactor: IoUringProactor | None = None):
+        # BaseEventLoop.__del__ may run when constructing the default proactor
+        # fails before the base initializer has set this field.
+        self._closed = True
         if proactor is None:
             proactor = IoUringProactor()
         super().__init__(proactor)
@@ -58,10 +61,12 @@ class IouringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             self._self_reading_future = None
 
     async def sock_sendall(self, sock: socket.socket | io.IOBase, data: Buffer):
-        total_length: int = len(memoryview(data))
-        while total_length > 0:
-            sent = await self._proactor.send(sock, data)
-            total_length -= sent
+        view = memoryview(data).cast("B")
+        while len(view) > 0:
+            sent = await self._proactor.send(sock, view)
+            # a partial send must continue after the sent bytes, not resend
+            # the whole buffer from the start
+            view = view[sent:]
         return
 
     async def create_unix_connection(
@@ -247,14 +252,20 @@ class UnixProactorPidfdChildWatcher(unix_events.AbstractChildWatcher):
 
         def _do_wait(fut: futures.Future[int]):
             try:
-                _, status = os.waitpid(pid, 0)
-            except ChildProcessError:
-                returncode = 255
-                logger.warning("child process pid %d exit status already read:  will report returncode 255", pid)
-            else:
-                returncode = unix_events.waitstatus_to_exitcode(status)
+                if fut.cancelled():
+                    # the poll was cancelled (e.g. loop shutdown) so the child
+                    # may still be running; waitpid would block the event loop
+                    return
+                try:
+                    _, status = os.waitpid(pid, 0)
+                except ChildProcessError:
+                    returncode = 255
+                    logger.warning("child process pid %d exit status already read:  will report returncode 255", pid)
+                else:
+                    returncode = os.waitstatus_to_exitcode(status)
+            finally:
+                os.close(pidfd)
 
-            os.close(pidfd)
             callback(pid, returncode, *args)
 
         fut.add_done_callback(_do_wait)
