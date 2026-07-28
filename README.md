@@ -39,6 +39,8 @@ uv add uringloop
 pip install uringloop
 ```
 
+Only a source distribution is published, so the CFFI extension is compiled during installation; the liburing development headers (see Requirements) and a C compiler must be present.
+
 ## Quick Start
 
 Pass the loop factory to `asyncio.run` to use the io_uring-based event loop:

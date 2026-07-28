@@ -1,13 +1,24 @@
 [project]
 name = "uringloop"
 version = "0.1.0"
-description = ""
+description = "An io_uring-based proactor event loop for asyncio"
 readme = "README.md"
+license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "cffi>=1.17.1",
-    "setuptools>=78.1.0",
+]
+keywords = ["asyncio", "io_uring", "liburing", "event loop", "proactor", "linux"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "Topic :: System :: Networking",
 ]
 
 [project.urls]
@@ -80,11 +91,9 @@ order-by-type = true
 
 # setuptools
 [build-system]
-requires = ["setuptools>=78", "cffi>=1.17.1", "wheel"]
+requires = ["setuptools>=78", "cffi>=1.17.1"]
 build-backend = "setuptools.build_meta"
-package-dir = {"" = "."}
 
 [tool.setuptools]
 packages = ["uringloop"]
 include-package-data = true
-py-modules = ["ffi"]

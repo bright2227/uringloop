@@ -1,1 +1,7 @@
-recursive-include uringloop *
+include _ffi_build.py
+recursive-include uringloop *.py *.pyi
+include uringloop/py.typed
+exclude uringloop/_liburing.c
+exclude uringloop/_liburing.o
+exclude uringloop/_liburing*.so
+recursive-exclude uringloop/__pycache__ *

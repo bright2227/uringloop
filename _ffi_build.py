@@ -317,6 +317,7 @@ ffibuilder.cdef("""
     int io_uring_wait_cqe_timeout(struct io_uring *ring, struct io_uring_cqe **cqe_ptr, struct __kernel_timespec *ts);
 """)
 
-# TODO: remove this trick, i feel it is not a official way.
-if __name__ == "__cffi__" or  __name__ == "__main__":
+# for manual development builds; setuptools' cffi_modules integration only
+# needs the ffibuilder attribute and drives the compilation itself
+if __name__ == "__main__":
     ffibuilder.compile(verbose=True)
