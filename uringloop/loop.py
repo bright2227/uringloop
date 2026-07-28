@@ -5,8 +5,7 @@ import io
 import os
 import socket
 import stat
-from typing import Any, Callable, cast
-import warnings
+from typing import Any, cast
 
 from uringloop.lib import POLLERR, POLLHUP, POLLIN
 from uringloop.log import logger
@@ -193,64 +192,31 @@ class IouringProactorEventLoop(proactor_events.BaseProactorEventLoop):
     async def _make_subprocess_transport(
         self, protocol, args, shell, stdin, stdout, stderr, bufsize: int, extra=None, **kwargs
     ):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            watcher = events.get_child_watcher()
-
-        with watcher:
-            if not watcher.is_active():
-                # Check early.
-                # Raising exception before process creation
-                # prevents subprocess execution if the watcher
-                # is not ready to handle it.
-                raise RuntimeError("asyncio.get_child_watcher() is not activated, subprocess support is not installed.")
-            waiter = self.create_future()
-            transp = unix_events._UnixSubprocessTransport(   # type: ignore[reportPrivateUsage]
-                self, protocol, args, shell, stdin, stdout, stderr, bufsize, waiter=waiter, extra=extra, **kwargs
-            )
-            watcher.add_child_handler(cast(int, transp.get_pid()), self._child_watcher_callback, transp)
-            try:
-                await waiter
-            except (SystemExit, KeyboardInterrupt):
-                raise
-            except BaseException:
-                transp.close()
-                await transp._wait()
-                raise
+        waiter = self.create_future()
+        transp = unix_events._UnixSubprocessTransport(   # type: ignore[reportPrivateUsage]
+            self, protocol, args, shell, stdin, stdout, stderr, bufsize, waiter=waiter, extra=extra, **kwargs
+        )
+        self._watch_child(cast(int, transp.get_pid()), transp)
+        try:
+            await waiter
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException:
+            transp.close()
+            await transp._wait()
+            raise
 
         return transp
 
-    def _make_write_pipe_transport(self, sock, protocol, waiter=None, extra=None):
-        return _IouringWritePipeTransport(self, sock, protocol, waiter, extra)
+    def _watch_child(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):   # type: ignore[reportPrivateUsage]
+        """Reap the child through a pidfd polled by io_uring.
 
-    def _child_watcher_callback(self, pid: int, returncode: int, transp: unix_events._UnixSubprocessTransport):   # type: ignore[reportPrivateUsage]
-        self.call_soon_threadsafe(transp._process_exited, returncode)
-
-
-class UnixProactorPidfdChildWatcher(unix_events.AbstractChildWatcher):
-    """Child watcher implementation using io uring and Linux's pid file descriptors."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        pass
-
-    def is_active(self):
-        return True
-
-    def close(self):
-        pass
-
-    def attach_loop(self, loop: events.AbstractEventLoop | None):
-        pass
-
-    def add_child_handler(self, pid: int, callback: Callable[[int, int, *tuple[Any, ...]], Any], *args: tuple[Any, ...]):
-        loop = events.get_running_loop()
+        This replaces the child watcher API, which was removed in Python 3.14.
+        """
         pidfd = os.pidfd_open(pid)
-        fut: futures.Future[int] = cast(IoUringProactor, loop._proactor).poll_add(pidfd, POLLIN)   # type: ignore[reportPrivateUsage]
+        fut: futures.Future[int] = self._proactor.poll_add(pidfd, POLLIN)
 
-        def _do_wait(fut: futures.Future[int]):
+        def _child_exited(fut: futures.Future[int]):
             try:
                 if fut.cancelled():
                     # the poll was cancelled (e.g. loop shutdown) so the child
@@ -266,55 +232,21 @@ class UnixProactorPidfdChildWatcher(unix_events.AbstractChildWatcher):
             finally:
                 os.close(pidfd)
 
-            callback(pid, returncode, *args)
+            self.call_soon(transp._process_exited, returncode)  # type: ignore[reportPrivateUsage]
 
-        fut.add_done_callback(_do_wait)
+        fut.add_done_callback(_child_exited)
 
-    def remove_child_handler(self, pid: int):
-        # asyncio never calls remove_child_handler() !!!
-        # The method is no-op but is implemented because
-        # abstract base classes require it.
-        return True
+    def _make_write_pipe_transport(self, sock, protocol, waiter=None, extra=None):
+        return _IouringWritePipeTransport(self, sock, protocol, waiter, extra)
 
 
-class IouringProactorEventLoopPolicy(events.BaseDefaultEventLoopPolicy):
+# Preserve the child-watcher methods on Python 3.12 and 3.13 by using the Unix
+# policy while it exists. Python 3.14 removed that policy and renamed the
+# generic base, so fall back to whichever generic name is available there.
+_BaseDefaultEventLoopPolicy: type[Any] = getattr(unix_events, "_UnixDefaultEventLoopPolicy", None) or (
+    getattr(events, "BaseDefaultEventLoopPolicy", None) or getattr(events, "_BaseDefaultEventLoopPolicy")
+)
+
+
+class IouringProactorEventLoopPolicy(_BaseDefaultEventLoopPolicy):
     _loop_factory = IouringProactorEventLoop
-
-    def __init__(self):
-        super().__init__()
-        self._watcher: unix_events.AbstractChildWatcher | None = None
-
-    def _init_watcher(self):
-        with events._lock:
-            if self._watcher is None:
-                self._watcher = UnixProactorPidfdChildWatcher()
-
-    def get_child_watcher(self):
-        """Get the watcher for child processes.
-
-        If not yet set, a ThreadedChildWatcher object is automatically created.
-        """
-        if self._watcher is None:
-            self._init_watcher()
-
-        warnings._deprecated(
-            "get_child_watcher",
-            "{name!r} is deprecated as of Python 3.12 and will be removed in Python {remove}.",
-            remove=(3, 14),
-        )
-        return self._watcher
-
-    def set_child_watcher(self, watcher: unix_events.AbstractChildWatcher | None):
-        """Set the watcher for child processes."""
-
-        assert watcher is None or isinstance(watcher, unix_events.AbstractChildWatcher)
-
-        if self._watcher is not None:
-            self._watcher.close()
-
-        self._watcher = watcher
-        warnings._deprecated(
-            "set_child_watcher",
-            "{name!r} is deprecated as of Python 3.12 and will be removed in Python {remove}.",
-            remove=(3, 14),
-        )

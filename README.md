@@ -41,15 +41,12 @@ pip install uringloop
 
 ## Quick Start
 
-Set the event loop policy with asyncio.set_event_loop_policy(IouringProactorEventLoopPolicy()) to use the io_uring-based event loop.
+Pass the loop factory to `asyncio.run` to use the io_uring-based event loop:
 
 ```python
 import asyncio
 
-from uringloop import IouringProactorEventLoopPolicy
-
-
-asyncio.set_event_loop_policy(IouringProactorEventLoopPolicy())
+from uringloop import IouringProactorEventLoop
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -113,7 +110,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(), loop_factory=IouringProactorEventLoop)
 
 ```
 
@@ -122,11 +119,22 @@ the result would looks like
 ```console
 Serving on ('127.0.0.1', 8888)
 Send: 'Hello, World!'
-Connection from ('0.0.0.0', 0)
+Connection from ('127.0.0.1', 52306)
 Received: Hello, World!
 Received: 'Hello, World!'
 Closing connection
-Connection with ('0.0.0.0', 0) closed
+Connection with ('127.0.0.1', 52306) closed
+```
+
+An event loop policy is also available for code that still uses the (deprecated since Python 3.14) policy system:
+
+```python
+import asyncio
+
+from uringloop import IouringProactorEventLoopPolicy
+
+asyncio.set_event_loop_policy(IouringProactorEventLoopPolicy())
+asyncio.run(main())
 ```
 
 ## Contributing
