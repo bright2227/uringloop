@@ -12,7 +12,7 @@ from uringloop.log import logger
 from uringloop.proactor import IoUringProactor
 
 
-class _IouringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport):  # type: ignore[reportPrivateUsage]
+class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport):  # type: ignore[reportPrivateUsage]
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
         self._read_fut = cast(IoUringProactor, self._loop._proactor).poll_add(self._sock, POLLERR | POLLHUP)  # type: ignore[reportPrivateUsage]
@@ -35,8 +35,8 @@ class _IouringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport
             self.close()
 
 
-class IouringProactorEventLoop(proactor_events.BaseProactorEventLoop):
-    """Linux version of proactor event loop using Iouring."""
+class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
+    """Linux version of proactor event loop using IoUring."""
 
     def __init__(self, proactor: IoUringProactor | None = None):
         # BaseEventLoop.__del__ may run when constructing the default proactor
@@ -237,7 +237,7 @@ class IouringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         fut.add_done_callback(_child_exited)
 
     def _make_write_pipe_transport(self, sock, protocol, waiter=None, extra=None):
-        return _IouringWritePipeTransport(self, sock, protocol, waiter, extra)
+        return _IoUringWritePipeTransport(self, sock, protocol, waiter, extra)
 
 
 # Preserve the child-watcher methods on Python 3.12 and 3.13 by using the Unix
@@ -248,5 +248,10 @@ _BaseDefaultEventLoopPolicy: type[Any] = getattr(unix_events, "_UnixDefaultEvent
 )
 
 
-class IouringProactorEventLoopPolicy(_BaseDefaultEventLoopPolicy):
-    _loop_factory = IouringProactorEventLoop
+class IoUringProactorEventLoopPolicy(_BaseDefaultEventLoopPolicy):
+    _loop_factory = IoUringProactorEventLoop
+
+
+# deprecated aliases kept for backwards compatibility with the 0.1.x naming
+IouringProactorEventLoop = IoUringProactorEventLoop
+IouringProactorEventLoopPolicy = IoUringProactorEventLoopPolicy

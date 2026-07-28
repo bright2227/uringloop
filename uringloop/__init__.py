@@ -1,10 +1,22 @@
-__all__ = ["IoUringProactor", "IouringProactorEventLoopPolicy", "IouringProactorEventLoop"]
+__all__ = [
+    "IoUringProactor",
+    "IoUringProactorEventLoop",
+    "IoUringProactorEventLoopPolicy",
+    # deprecated aliases (0.1.x naming)
+    "IouringProactorEventLoop",
+    "IouringProactorEventLoopPolicy",
+]
 
 
 import platform
 import re
 
-from uringloop.loop import IouringProactorEventLoop, IouringProactorEventLoopPolicy
+from uringloop.loop import (
+    IoUringProactorEventLoop,
+    IoUringProactorEventLoopPolicy,
+    IouringProactorEventLoop,
+    IouringProactorEventLoopPolicy,
+)
 from uringloop.proactor import IoUringProactor
 
 

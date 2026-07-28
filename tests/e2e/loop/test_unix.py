@@ -4,13 +4,13 @@ from typing import Any, cast
 
 import pytest
 
-from uringloop.loop import IouringProactorEventLoop
+from uringloop.loop import IoUringProactorEventLoop
 
 
 @pytest.mark.asyncio
 async def test_unix_connection(unix_socket_path: str):
     event_loop = asyncio.get_running_loop()
-    assert isinstance(event_loop, IouringProactorEventLoop)
+    assert isinstance(event_loop, IoUringProactorEventLoop)
     # Server protocol
     class EchoServerProtocol(asyncio.Protocol):
         def connection_made(self, transport: asyncio.BaseTransport):

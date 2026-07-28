@@ -79,7 +79,7 @@ def server_udp_sock() -> Generator[socket.socket, None, None]:
 @pytest_asyncio.fixture
 async def init_proactor() -> AsyncGenerator[IoUringProactor, None]:
     """Fixture to create and clean up the proactor and its polling task."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     proactor = IoUringProactor()
     proactor.set_loop(loop)
 
@@ -93,13 +93,13 @@ async def init_proactor() -> AsyncGenerator[IoUringProactor, None]:
     task = loop.create_task(_run_proactor_task())
 
     def stop_all_coro_if_raise_exception(task: asyncio.Task[None]):
+        if task.cancelled():
+            return
         if task.exception():  # If task failed
-            # Cancel all other tasks
+            # Cancel all other tasks so the test fails instead of hanging
             for t in asyncio.all_tasks(loop):
                 if t != task and not t.done():
                     t.cancel()
-
-            loop.run_until_complete(loop.shutdown_asyncgens())
 
     # Add failure callback
     task.add_done_callback(stop_all_coro_if_raise_exception)

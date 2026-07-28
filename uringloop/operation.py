@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Buffer
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BufferedReader, IOBase
 import os
 import socket
@@ -43,371 +43,199 @@ def get_os_error(res: int) -> OSError:
 
 
 @dataclass(slots=True)
-class SendOperation(BaseOperation):
-    sock: socket.socket
-    buffer: Annotated[Buffer, "readable"]
-    flags: int
-    user_data: int
-    cqe_received: bool = False
+class SingleCqeOperation(BaseOperation):
+    """An operation completed by exactly one CQE.
+
+    Subclasses only define their fields, get_file_obj and _result.
+    """
+
+    user_data: int = field(kw_only=True)
+    cqe_received: bool = field(default=False, kw_only=True)
 
     def get_user_data(
         self,
     ) -> int | None:
         return None if self.cqe_received else self.user_data
 
-    def get_file_obj(self) -> Any:
-        return self.sock
+    def mark_seen(self, user_data: int) -> None:
+        if user_data != self.user_data:
+            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
+        self.cqe_received = True
+
+    def all_seen(self) -> bool:
+        return self.cqe_received
 
     def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
         res: int = cqe.res
         if res < 0:
             fut.set_exception(get_os_error(res))
         else:
-            fut.set_result(res)
+            fut.set_result(self._result(res))
 
-    def mark_seen(self, user_data: int):
-        if user_data == self.user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    @abstractmethod
+    def _result(self, res: int) -> Any:
+        """Build the future's result from a non-negative CQE res."""
+        ...
 
 
 @dataclass(slots=True)
-class WriteOperation(BaseOperation):
+class SendOperation(SingleCqeOperation):
+    sock: socket.socket
+    buffer: Annotated[Buffer, "readable"]
+    flags: int
+
+    def get_file_obj(self) -> Any:
+        return self.sock
+
+    def _result(self, res: int) -> int:
+        return res
+
+
+@dataclass(slots=True)
+class WriteOperation(SingleCqeOperation):
     file: IOBase
     buffer: Annotated[Buffer, "readable"]
     offset: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.file
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(res)
-
-    def mark_seen(self, user_data: int):
-        if user_data == self.user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> int:
+        return res
 
 
 @dataclass(slots=True)
-class RecvOperation(BaseOperation):
+class RecvOperation(SingleCqeOperation):
     sock: socket.socket
     buffer: Annotated[Buffer, "writable"]
     flags: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.sock
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(memoryview(self.buffer)[:res].tobytes())
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> bytes:
+        return memoryview(self.buffer)[:res].tobytes()
 
 
 @dataclass(slots=True)
-class ReadOperation(BaseOperation):
+class ReadOperation(SingleCqeOperation):
     file: IOBase
     buffer: Annotated[Buffer, "writable"]
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.file
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(memoryview(self.buffer)[:res].tobytes())
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> bytes:
+        return memoryview(self.buffer)[:res].tobytes()
 
 
 @dataclass(slots=True)
-class RecvIntoOperation(BaseOperation):
+class RecvIntoOperation(SingleCqeOperation):
     sock: socket.socket
     buffer: Annotated[Buffer, "writable"]
     flags: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.sock
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(res)
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> int:
+        return res
 
 
 @dataclass(slots=True)
-class ReadIntoOperation(BaseOperation):
+class ReadIntoOperation(SingleCqeOperation):
     file: IOBase
     buffer: Annotated[Buffer, "writable"]
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.file
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(res)
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> int:
+        return res
 
 
 @dataclass(slots=True)
-class RecvFromOperation(BaseOperation):
+class RecvFromOperation(SingleCqeOperation):
     sock: socket.socket
     buffer: Annotated[Buffer, "writable"]
     sockaddr: Annotated[Sockaddr, "writable"]
     flags: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.sock
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result((memoryview(self.buffer)[:res].tobytes(), parse_addr(self.sock.family, self.sockaddr)))
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> tuple[bytes, Any]:
+        return (memoryview(self.buffer)[:res].tobytes(), parse_addr(self.sock.family, self.sockaddr))
 
 
 @dataclass(slots=True)
-class RecvFromIntoOperation(BaseOperation):
+class RecvFromIntoOperation(SingleCqeOperation):
     sock: socket.socket
     buffer: Annotated[Buffer, "writable"]
     sockaddr: Annotated[Sockaddr, "writable"]
     flags: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.sock
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result((res, parse_addr(self.sock.family, self.sockaddr)))
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> tuple[int, Any]:
+        return (res, parse_addr(self.sock.family, self.sockaddr))
 
 
 @dataclass(slots=True)
-class SendToOperation(BaseOperation):
+class SendToOperation(SingleCqeOperation):
     sock: socket.socket
     buffer: Annotated[Buffer, "readable"]
     sockaddr: Annotated[Sockaddr, "readable"] | None
     flags: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.sock
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(res)
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> int:
+        return res
 
 
 @dataclass(slots=True)
-class ConnectOperation(BaseOperation):
+class ConnectOperation(SingleCqeOperation):
     sock: socket.socket
     sockaddr: Annotated[Sockaddr, "readable"]
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.sock
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(None)
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received
+    def _result(self, res: int) -> None:
+        return None
 
 
 @dataclass(slots=True)
-class AcceptOperation(BaseOperation):
+class AcceptOperation(SingleCqeOperation):
     sock: socket.socket
     sockaddr: Annotated[Sockaddr, "writable"]
     flags: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
 
     def get_file_obj(self) -> Any:
         return self.sock
 
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            # socket.fromfd would dup() the fd and leak the original one;
-            # wrap the accepted fd directly instead (same as socket.accept)
-            sock = socket.socket(self.sock.family, self.sock.type, self.sock.proto, fileno=res)
-            if socket.getdefaulttimeout() is None and self.sock.gettimeout():
-                sock.setblocking(True)
-            fut.set_result((sock, parse_addr(self.sock.family, self.sockaddr)))
+    def _result(self, res: int) -> tuple[socket.socket, Any]:
+        # socket.fromfd would dup() the fd and leak the original one;
+        # wrap the accepted fd directly instead (same as socket.accept)
+        sock = socket.socket(self.sock.family, self.sock.type, self.sock.proto, fileno=res)
+        if socket.getdefaulttimeout() is None and self.sock.gettimeout():
+            sock.setblocking(True)
+        return (sock, parse_addr(self.sock.family, self.sockaddr))
 
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
 
-    def all_seen(self) -> bool:
-        return self.cqe_received
+@dataclass(slots=True)
+class PollAddOperation(SingleCqeOperation):
+    file: IOBase | socket.socket | int  # some source is not a obj
+    poll_mask: int
+
+    def get_file_obj(self) -> Any:
+        return self.file
+
+    def _result(self, res: int) -> int:
+        return res
 
 
 @dataclass(slots=True)
@@ -461,35 +289,3 @@ class SendfileOperation(BaseOperation):
 
     def all_seen(self) -> bool:
         return self.p2s_done
-
-
-@dataclass(slots=True)
-class PollAddOperation(BaseOperation):
-    file: IOBase | socket.socket | int  # some source is not a obj
-    poll_mask: int
-    user_data: int
-    cqe_received: bool = False
-
-    def get_user_data(
-        self,
-    ) -> int | None:
-        return None if self.cqe_received else self.user_data
-
-    def get_file_obj(self) -> Any:
-        return self.file
-
-    def operate(self, cqe: IoUringCqe, fut: "_IoUringFuture"):
-        res: int = cqe.res
-        if res < 0:
-            fut.set_exception(get_os_error(res))
-        else:
-            fut.set_result(res)
-
-    def mark_seen(self, user_data: int):
-        if self.user_data == user_data:
-            self.cqe_received = True
-        else:
-            raise RuntimeError(f"Unknown user_data: {user_data} is not expected.")
-
-    def all_seen(self) -> bool:
-        return self.cqe_received

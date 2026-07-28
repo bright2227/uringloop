@@ -1,24 +1,17 @@
-import asyncio
 import os
 import tempfile
-from typing import cast
 
 import pytest
-import pytest_asyncio
 
-from uringloop.loop import IouringProactorEventLoop, IouringProactorEventLoopPolicy
+from uringloop.loop import IoUringProactorEventLoopPolicy
 
 
-@pytest_asyncio.fixture(scope="package", autouse=True)
-async def event_loop_policy():
-    asyncio.set_event_loop_policy(IouringProactorEventLoopPolicy())
+@pytest.fixture(scope="package")
+def event_loop_policy():
+    # overriding this fixture is the documented pytest-asyncio way to run
+    # every test in the package on loops created by this policy
+    return IoUringProactorEventLoopPolicy()
 
-# TODO: remove pytest_asyncio warning
-@pytest.fixture
-def event_loop():
-    loop = asyncio.get_event_loop()
-    yield cast(IouringProactorEventLoop, loop)
-    loop.close()
 
 @pytest.fixture
 def unix_socket_path():
