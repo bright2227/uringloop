@@ -16,3 +16,4 @@ wheels/
 _liburing.c
 _liburing.o
 _liburing.*.so
+_uringcore_liburing.*.so

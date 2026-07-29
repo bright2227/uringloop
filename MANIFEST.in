@@ -1,4 +1,7 @@
 include _ffi_build.py
+include src/uringcore_liburing.c
+include THIRD_PARTY_LICENSES/liburing-MIT.txt
+recursive-include docs *.md
 recursive-include uringloop *.py *.pyi
 include uringloop/py.typed
 exclude uringloop/_liburing.c

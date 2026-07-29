@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "An io_uring-based proactor event loop for asyncio"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES/*"]
 requires-python = ">=3.12"
 dependencies = [
     "cffi>=1.17.1",
