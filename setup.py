@@ -7,6 +7,12 @@ setup(
         Extension(
             "uringloop._uringcore",
             sources=["src/uringcore.c"],
-        )
+        ),
+        Extension(
+            "uringloop._uringcore_liburing",
+            sources=["src/uringcore_liburing.c"],
+            include_dirs=["libs/src/include"],
+            extra_objects=["libs/src/liburing.a"],
+        ),
     ],
 )

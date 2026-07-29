@@ -17,3 +17,4 @@ _liburing.c
 _liburing.o
 _liburing.*.so
 _uringcore.*.so
+_uringcore_liburing.*.so
