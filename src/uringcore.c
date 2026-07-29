@@ -2,10 +2,9 @@
 #include <Python.h>
 #include <structmember.h>
 
-#include <errno.h>
+#include <limits.h>
 #include <linux/io_uring.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -70,18 +69,41 @@ static int
 uringcore_ring_init(UringCoreRing *self, PyObject *args, PyObject *kwargs)
 {
     static char *keyword_names[] = {"entries", NULL};
+    PyObject *entries_object = NULL;
+    PyObject *entries_index = NULL;
+    unsigned long parsed_entries;
     unsigned int entries = 256;
     struct io_uring_params params;
     size_t sq_ring_size;
     size_t cq_ring_size;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "|I:Ring", keyword_names, &entries)) {
+            args, kwargs, "|O:Ring", keyword_names, &entries_object)) {
         return -1;
     }
-    if (entries == 0) {
-        PyErr_SetString(PyExc_ValueError, "entries must be greater than zero");
-        return -1;
+    if (entries_object != NULL) {
+        entries_index = PyNumber_Index(entries_object);
+        if (entries_index == NULL) {
+            return -1;
+        }
+        parsed_entries = PyLong_AsUnsignedLong(entries_index);
+        Py_DECREF(entries_index);
+        if (parsed_entries == (unsigned long)-1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            PyErr_Format(
+                PyExc_ValueError,
+                "entries must be between 1 and %u",
+                UINT_MAX);
+            return -1;
+        }
+        if (parsed_entries == 0 || parsed_entries > UINT_MAX) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "entries must be between 1 and %u",
+                UINT_MAX);
+            return -1;
+        }
+        entries = (unsigned int)parsed_entries;
     }
 
     uringcore_ring_close_resources(self);
