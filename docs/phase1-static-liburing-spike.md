@@ -21,7 +21,9 @@ The two lifecycle implementations use the same API and tests. The resulting
 [backend decision](phase1-native-ring-decision.md) selects the statically
 linked, vendored liburing route. This spike is not yet the production backend:
 the follow-up work must add full sanitizer coverage, move this implementation
-to `_uringcore`, and remove the raw spike.
+to `_uringcore`, and replace the comparison-spike module name. The raw spike is
+preserved separately on `feature/raw-syscall-ring-spike`; it is not built or
+packaged by this branch.
 
 On the initial CPython 3.12 x86-64 development build, including debug
 information, the module sizes are:

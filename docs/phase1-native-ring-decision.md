@@ -10,10 +10,10 @@ ring and link it statically into the extension. The production module will use
 the canonical `_uringcore` name; `_uringcore_liburing` is only the
 comparison-spike name.
 
-The raw-syscall implementation will remain available only until a follow-up
-change moves the selected implementation to `_uringcore` and removes the two
-experimental backends. The project will not maintain both implementations in
-production.
+The raw-syscall spike is preserved on the
+`feature/raw-syscall-ring-spike` branch for future reference, but it is not
+built or packaged by the selected implementation branch. The project will not
+maintain both implementations in production.
 
 ## Context
 
@@ -123,7 +123,8 @@ following work blocks that transition:
 1. Build liburing itself with ASAN/UBSAN flags in sanitizer jobs, then run the
    native e2e suite against that instrumented archive.
 1. Move the selected implementation behind the canonical `_uringcore` name
-   and remove the raw backend, duplicate stub, tests, and build configuration.
+   and replace the comparison-spike module name, stub, tests, and build
+   configuration.
 1. Implement and benchmark the native prepare/submit/reap batch boundary
    before making claims about syscall or CPU improvements.
 1. Continue with the refcounted multi-completion request state machine only
