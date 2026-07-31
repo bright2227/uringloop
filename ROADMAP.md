@@ -138,15 +138,21 @@ API.
   The decision record must compare wheel size, license/attribution, build
   complexity, sanitizer coverage, syscall overhead, and the unsafe surface.
   Raw syscalls require correctly implementing the acquire/release ordering on
-  shared ring heads and tails that liburing already handles.
+  shared ring heads and tails that liburing already handles. The
+  [Phase 1 backend decision](docs/phase1-native-ring-decision.md), accepted on
+  2026-08-01, selects the statically linked, vendored liburing route and
+  records the measurements and required follow-up.
+
 - Move request lifetimes into native structs. A request owns every
   kernel-referenced buffer, sockaddr, msghdr, and iovec.
+
 - Use a refcounted, multi-completion request state machine rather than
   "release on the first CQE." At minimum it must model submitted,
   cancel-pending, operation-complete, notification-pending, and released
   states. `SEND_ZC` normally produces an operation CQE followed by a
   notification CQE, and asynchronous cancellation can race with a successful
   operation completion.
+
 - Add a bounded provided-buffer pool with explicit memory accounting and
   backpressure. Be precise about copying:
 
@@ -158,8 +164,10 @@ API.
 - Size the CQ explicitly for multishot workloads, detect overflow, drain
   promptly, and test re-arming when the kernel terminates a multishot
   operation by clearing `IORING_CQE_F_MORE`.
+
 - Expose a small, GIL-conscious batch API: prepare operations, submit once per
   loop tick, and reap a batch of completions in one native call.
+
 - Add EINTR handling, runtime opcode/feature probing, and registered-ring-fd
   support where probing and measurement justify it.
 

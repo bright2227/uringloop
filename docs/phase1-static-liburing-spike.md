@@ -12,12 +12,14 @@ MIT license, whose notice is included in the package.
 Like the raw-syscall spike, this module owns ring initialization and teardown
 but does not submit or reap operations and is not wired into the Python
 proactor. The source checkout must configure and build the pinned submodule
-before building this experimental extension; packaging the vendored sources
-for standalone wheel builds remains part of the route decision.
+before building this experimental extension. Packaging the vendored sources
+for standalone wheel builds remains required follow-up.
 
-The decision record can now compare the two lifecycle implementations using
-the same API and tests. Neither spike is the production backend until that
-record selects a route.
+The two lifecycle implementations use the same API and tests. The resulting
+[backend decision](phase1-native-ring-decision.md) selects the statically
+linked, vendored liburing route. This spike is not yet the production backend:
+the follow-up work must make source builds self-contained, add full sanitizer
+coverage, move this implementation to `_uringcore`, and remove the raw spike.
 
 On the initial CPython 3.12 x86-64 development build, including debug
 information, the module sizes are:
@@ -27,7 +29,6 @@ information, the module sizes are:
 | Raw syscalls | 35,152 bytes |
 | Static liburing | 109,840 bytes |
 
-The static module adds 74,688 bytes in this build. These are spike
-measurements rather than release-wheel results; the decision record must
-repeat them with the release build and record its compiler and strip
-settings.
+The static module adds 74,688 bytes in this build. See the backend decision
+for compressed wheel-member sizes, stripped sizes, the measurement
+environment, and the other selection criteria.
