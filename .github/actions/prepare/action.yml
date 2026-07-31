@@ -1,5 +1,5 @@
 name: "Prepare Build Environment"
-description: "Build/install liburing and install Python deps (repo must already be checked out with submodules)"
+description: "Install Python and project dependencies (repo must already be checked out with submodules)"
 inputs:
   python-version:
     description: "Python version to set up"
@@ -8,35 +8,9 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Get liburing commit hash
-      id: cache-info
-      shell: bash
-      run: echo "liburing_hash=$(cd libs && git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-    - name: Cache liburing build
-      id: cache-liburing
-      uses: actions/cache@v4
-      with:
-        path: libs/
-        key: ${{ runner.os }}-${{ runner.arch }}-liburing-${{ steps.cache-info.outputs.liburing_hash }}
-
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
-
-    - name: Build liburing (if cache miss)
-      if: steps.cache-liburing.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        cd libs
-        ./configure
-        make
-
-    - name: Install liburing (always)
-      shell: bash
-      run: |
-        cd libs
-        sudo make install
 
     - name: Install UV
       uses: astral-sh/setup-uv@v5

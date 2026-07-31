@@ -96,7 +96,7 @@ their hot-path cost is zero.
 | Wheel size | Smaller | About 32 KB more compressed in this comparison build |
 | Runtime dependency | None beyond libc and the kernel ABI | None beyond libc and the kernel ABI |
 | Build complexity | Ordinary extension build | Must build and statically link the pinned submodule |
-| Source packaging | Self-contained now | Vendored sources are not yet present in the sdist |
+| Source packaging | Self-contained | Self-contained through the vendored-source build hook |
 | License work | No additional bundled-library notice | MIT notice must remain in binary/source distributions |
 | Sanitizers | Extension flags cover all project-owned ring code | liburing must also be rebuilt with matching sanitizer flags |
 | Lifecycle syscall count | Identical | Identical |
@@ -120,9 +120,6 @@ correctness and maintenance risk removed from the Phase 1 request core.
 Selecting liburing does not declare the current spike production-ready. The
 following work blocks that transition:
 
-1. Include the pinned liburing source and required headers in the sdist, and
-   build the archive as part of a source/wheel build instead of assuming that
-   `libs/src/liburing.a` already exists.
 1. Build liburing itself with ASAN/UBSAN flags in sanitizer jobs, then run the
    native e2e suite against that instrumented archive.
 1. Move the selected implementation behind the canonical `_uringcore` name
@@ -134,3 +131,12 @@ following work blocks that transition:
 
 The pure-Python/CFFI implementation remains the behavioral oracle throughout
 this work.
+
+## Packaging follow-up
+
+The first required follow-up was completed by teaching `build_ext` to copy,
+configure, and compile the pinned liburing sources in its private build
+directory. The sdist includes only the source, internal headers, and build
+metadata needed for that archive. Both extension modules link the resulting
+archive, so a clean source build neither consumes a checkout artifact nor
+links a system `liburing.so`.
