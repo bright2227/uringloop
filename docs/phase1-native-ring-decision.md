@@ -124,7 +124,8 @@ following work blocks that transition:
    native e2e suite against that instrumented archive.
 1. Move the selected implementation behind the canonical `_uringcore` name
    and replace the comparison-spike module name, stub, tests, and build
-   configuration.
+   configuration. This transition was completed after the native NOP request
+   lifecycle landed.
 1. Implement and benchmark the native prepare/submit/reap batch boundary
    before making claims about syscall or CPU improvements.
 1. Continue with the refcounted multi-completion request state machine only

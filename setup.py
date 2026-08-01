@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 LIBURING_SOURCE = ROOT / "libs"
 LIBURING_EXTENSION_NAMES = {
     "uringloop._liburing",
-    "uringloop._uringcore_liburing",
+    "uringloop._uringcore",
 }
 
 
@@ -83,7 +83,7 @@ setup(
     cmdclass={"build_ext": VendoredLiburingBuildExt},
     ext_modules=[
         Extension(
-            "uringloop._uringcore_liburing",
+            "uringloop._uringcore",
             sources=["src/uringcore_liburing.c"],
         ),
     ],
