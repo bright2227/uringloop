@@ -19,11 +19,9 @@ A Python implementation of a liburing-based proactor event loop for asyncio, des
 
 - Python 3.12+
 
-- liburing development libraries
-
-  ```bash
-  sudo apt install liburing-dev
-  ```
+- A C compiler and `make` when installing from source. The pinned liburing
+  sources are included and built automatically; a system `liburing-dev`
+  package is not required.
 
 ## Installation
 
@@ -39,7 +37,8 @@ uv add uringloop
 pip install uringloop
 ```
 
-Only a source distribution is published, so the CFFI extension is compiled during installation; the liburing development headers (see Requirements) and a C compiler must be present.
+Only a source distribution is currently published, so the native extensions
+and bundled liburing sources are compiled during installation.
 
 ## Quick Start
 

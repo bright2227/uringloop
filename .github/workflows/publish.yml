@@ -1,4 +1,4 @@
-name: Upload Package
+name: Publish package
 
 on:
   release:
@@ -8,7 +8,62 @@ permissions:
   contents: read
 
 jobs:
-  release-build:
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build source distribution
+        uses: ./.github/actions/build-distribution
+        with:
+          kind: sdist
+
+      - name: Upload source distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-wheel:
+    name: Build ${{ matrix.build }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - cp312-manylinux_x86_64
+          - cp313-manylinux_x86_64
+          - cp312-musllinux_x86_64
+          - cp313-musllinux_x86_64
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build wheel
+        uses: ./.github/actions/build-distribution
+        with:
+          kind: wheel
+          wheel-build: ${{ matrix.build }}
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-${{ matrix.build }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Upload distributions to PyPI
+    needs: [build-sdist, build-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -20,9 +75,12 @@ jobs:
       - name: Prepare environment
         uses: ./.github/actions/prepare
 
-      - name: Build release distributions
-        run: |
-          uv build -v --sdist
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: distribution-*
+          path: dist
+          merge-multiple: true
 
       # TODO: switch to PyPI Trusted Publishing (OIDC) and drop the token:
       # https://docs.pypi.org/trusted-publishers/
@@ -30,5 +88,4 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          uv run twine upload --verbose --repository pypi dist/*
+        run: uv run twine upload --verbose --repository pypi dist/*

@@ -23,11 +23,8 @@ ffibuilder.set_source(
     "uringloop._liburing",
     source_code,
     sources=[],
-    include_dirs=["./libs/src/include"],
     define_macros=[("_GNU_SOURCE", "1")],
     extra_compile_args=["-D_GNU_SOURCE"],
-    libraries=["uring"],  # Link against liburing
-    library_dirs=["./libs/src"],  # Path to the library
 )
 
 

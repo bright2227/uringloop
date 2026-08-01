@@ -36,3 +36,44 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -v
+
+  check-sdist:
+    name: Check source distribution
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build source distribution
+        uses: ./.github/actions/build-distribution
+        with:
+          kind: sdist
+
+  check-wheel:
+    name: Check ${{ matrix.build }}
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - cp312-manylinux_x86_64
+          - cp313-manylinux_x86_64
+          - cp312-musllinux_x86_64
+          - cp313-musllinux_x86_64
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build wheel
+        uses: ./.github/actions/build-distribution
+        with:
+          kind: wheel
+          wheel-build: ${{ matrix.build }}

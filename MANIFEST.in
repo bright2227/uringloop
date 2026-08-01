@@ -1,4 +1,21 @@
 include _ffi_build.py
+include libs/LICENSE
+include libs/Makefile.common
+include libs/Makefile.quiet
+include libs/configure
+include libs/liburing.spec
+include libs/src/Makefile
+include src/uringcore_liburing.c
+include THIRD_PARTY_LICENSES/liburing-MIT.txt
+recursive-include libs/src *.c
+include libs/src/int_flags.h
+include libs/src/lib.h
+include libs/src/syscall.h
+recursive-include libs/src/arch *.h
+include libs/src/include/liburing.h
+include libs/src/include/liburing/barrier.h
+include libs/src/include/liburing/io_uring.h
+recursive-include docs *.md
 recursive-include uringloop *.py *.pyi
 include uringloop/py.typed
 exclude uringloop/_liburing.c
