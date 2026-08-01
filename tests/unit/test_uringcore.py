@@ -3,11 +3,13 @@ import time
 
 import pytest
 
-from uringloop import _uringcore_liburing
+from uringloop import _uringcore
 
 
-def test_static_liburing_core_has_versioned_abi():
-    assert _uringcore_liburing.ABI_VERSION == 2
+def test_native_core_has_versioned_abi():
+    assert _uringcore.ABI_VERSION == 2
+    assert _uringcore.Ring.__module__ == "uringloop._uringcore"
+    assert _uringcore.Request.__module__ == "uringloop._uringcore"
 
 
 def reap_requests(ring, count):
@@ -22,13 +24,13 @@ def reap_requests(ring, count):
 
 
 @pytest.mark.parametrize("entries", [-(2**32), -1, 0, 2**32, 2**64])
-def test_static_liburing_ring_rejects_out_of_range_queue_size(entries):
+def test_native_ring_rejects_out_of_range_queue_size(entries):
     with pytest.raises(ValueError, match="entries must be between"):
-        _uringcore_liburing.Ring(entries)
+        _uringcore.Ring(entries)
 
 
-def test_static_liburing_ring_owns_and_releases_kernel_resources():
-    ring = _uringcore_liburing.Ring(8)
+def test_native_ring_owns_and_releases_kernel_resources():
+    ring = _uringcore.Ring(8)
 
     assert ring.sq_entries >= 8
     assert ring.cq_entries >= ring.sq_entries
@@ -41,8 +43,8 @@ def test_static_liburing_ring_owns_and_releases_kernel_resources():
     assert ring.closed is True
 
 
-def test_static_liburing_ring_context_manager_closes_resources():
-    with _uringcore_liburing.Ring(entries=8) as ring:
+def test_native_ring_context_manager_closes_resources():
+    with _uringcore.Ring(entries=8) as ring:
         assert ring.closed is False
 
     assert ring.closed is True
@@ -50,8 +52,8 @@ def test_static_liburing_ring_context_manager_closes_resources():
         ring.__enter__()
 
 
-def test_static_liburing_ring_submits_and_reaps_native_nop_requests():
-    ring = _uringcore_liburing.Ring(8)
+def test_native_ring_submits_and_reaps_native_nop_requests():
+    ring = _uringcore.Ring(8)
     requests = [ring.prepare_nop(), ring.prepare_nop()]
 
     assert ring.pending == 2
@@ -71,8 +73,8 @@ def test_static_liburing_ring_submits_and_reaps_native_nop_requests():
     assert [request.flags for request in requests] == [0, 0]
 
 
-def test_static_liburing_ring_keeps_request_alive_until_completion():
-    ring = _uringcore_liburing.Ring(8)
+def test_native_ring_keeps_request_alive_until_completion():
+    ring = _uringcore.Ring(8)
 
     ring.prepare_nop()
     assert ring.submit() == 1
@@ -82,8 +84,8 @@ def test_static_liburing_ring_keeps_request_alive_until_completion():
     assert request.result == 0
 
 
-def test_static_liburing_ring_close_releases_prepared_request_ownership():
-    ring = _uringcore_liburing.Ring(8)
+def test_native_ring_close_releases_prepared_request_ownership():
+    ring = _uringcore.Ring(8)
     request = ring.prepare_nop()
 
     ring.close()
@@ -96,10 +98,10 @@ def test_static_liburing_ring_close_releases_prepared_request_ownership():
 
 
 @pytest.mark.parametrize("max_completions", [-1, 0, 2**32, 2**64])
-def test_static_liburing_ring_reap_rejects_out_of_range_batch_size(
+def test_native_ring_reap_rejects_out_of_range_batch_size(
     max_completions,
 ):
-    ring = _uringcore_liburing.Ring(8)
+    ring = _uringcore.Ring(8)
 
     with pytest.raises(ValueError, match="max_completions must be between"):
         ring.reap(max_completions)

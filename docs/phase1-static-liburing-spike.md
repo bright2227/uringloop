@@ -1,7 +1,7 @@
 # Phase 1 static-liburing ring spike
 
-This is the second native ring implementation spike required by Phase 1 of
-the roadmap. It mirrors the lifecycle boundary of the raw-syscall
+This was the second native ring implementation spike required by Phase 1 of
+the roadmap. It mirrored the lifecycle boundary of the raw-syscall
 `_uringcore.Ring` with a separate `_uringcore_liburing.Ring` implemented
 through the pinned liburing submodule.
 
@@ -10,20 +10,20 @@ the module. It therefore has
 no runtime dependency on a system `liburing.so`. liburing is used under its
 MIT license, whose notice is included in the package.
 
-Like the raw-syscall spike, this module owns ring initialization and teardown
-but does not submit or reap operations and is not wired into the Python
+At the comparison boundary, the module owned ring initialization and teardown
+but did not submit or reap operations and was not wired into the Python
 proactor. The build configures and compiles a private archive from the pinned
 vendored sources, then links that archive into both the existing CFFI module
-and this experimental extension. Source builds therefore do not require a
-prebuilt archive or a system `liburing.so`.
+and the native extension. Source builds therefore do not require a prebuilt
+archive or a system `liburing.so`.
 
-The two lifecycle implementations use the same API and tests. The resulting
-[backend decision](phase1-native-ring-decision.md) selects the statically
-linked, vendored liburing route. This spike is not yet the production backend:
-the follow-up work must add full sanitizer coverage, move this implementation
-to `_uringcore`, and replace the comparison-spike module name. The raw spike is
-preserved separately on `feature/raw-syscall-ring-spike`; it is not built or
-packaged by this branch.
+The two lifecycle implementations used the same API and tests. The resulting
+[backend decision](phase1-native-ring-decision.md) selected the statically
+linked, vendored liburing route. Subsequent Phase 1 work added the native NOP
+request lifecycle and promoted this implementation to the canonical
+`_uringcore` module name. Full sanitizer coverage and the remaining request
+state-machine work are still required. The raw spike is preserved separately
+on `feature/raw-syscall-ring-spike`; it is not built or packaged.
 
 On the initial CPython 3.12 x86-64 development build, including debug
 information, the module sizes are:

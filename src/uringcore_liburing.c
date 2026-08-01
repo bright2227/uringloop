@@ -230,7 +230,7 @@ PyDoc_STRVAR(
 
 static PyTypeObject UringCoreLiburingRequestType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "uringloop._uringcore_liburing.Request",
+    .tp_name = "uringloop._uringcore.Request",
     .tp_basicsize = sizeof(UringCoreLiburingRequest),
     .tp_dealloc = (destructor)uringcore_liburing_request_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
@@ -657,7 +657,7 @@ PyDoc_STRVAR(
 
 static PyTypeObject UringCoreLiburingRingType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "uringloop._uringcore_liburing.Ring",
+    .tp_name = "uringloop._uringcore.Ring",
     .tp_basicsize = sizeof(UringCoreLiburingRing),
     .tp_dealloc = (destructor)uringcore_liburing_ring_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
@@ -669,15 +669,15 @@ static PyTypeObject UringCoreLiburingRingType = {
     .tp_new = uringcore_liburing_ring_new,
 };
 
-static PyModuleDef uringcore_liburing_module = {
+static PyModuleDef uringcore_module = {
     PyModuleDef_HEAD_INIT,
-    .m_name = "_uringcore_liburing",
-    .m_doc = "Statically linked liburing ring primitives.",
+    .m_name = "_uringcore",
+    .m_doc = "Native ring primitives backed by statically linked liburing.",
     .m_size = -1,
 };
 
 PyMODINIT_FUNC
-PyInit__uringcore_liburing(void)
+PyInit__uringcore(void)
 {
     PyObject *module;
 
@@ -688,7 +688,7 @@ PyInit__uringcore_liburing(void)
         return NULL;
     }
 
-    module = PyModule_Create(&uringcore_liburing_module);
+    module = PyModule_Create(&uringcore_module);
     if (module == NULL) {
         return NULL;
     }

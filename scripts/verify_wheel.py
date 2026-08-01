@@ -8,7 +8,7 @@ import subprocess
 
 EXTENSION_MODULES = (
     "uringloop._liburing",
-    "uringloop._uringcore_liburing",
+    "uringloop._uringcore",
 )
 
 
