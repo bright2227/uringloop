@@ -39,6 +39,7 @@ struct UringCoreLiburingRing {
     unsigned int features;
     unsigned int pending;
     unsigned int prepared;
+    unsigned long long generation;
 };
 
 static PyTypeObject UringCoreLiburingRequestType;
@@ -102,6 +103,7 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
     UringCoreLiburingRequest *request;
 
     if (self->initialized) {
+        self->generation++;
         io_uring_queue_exit(&self->ring);
         memset(&self->ring, 0, sizeof(self->ring));
         self->initialized = 0;
@@ -300,6 +302,7 @@ uringcore_liburing_ring_init(
     }
 
     self->initialized = 1;
+    self->generation++;
     self->sq_entries = params.sq_entries;
     self->cq_entries = params.cq_entries;
     self->features = params.features;
@@ -369,15 +372,27 @@ uringcore_liburing_ring_submit(
 {
     UringCoreLiburingRequest *request;
     unsigned int remaining;
+    unsigned long long generation;
     int result;
 
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
         return NULL;
     }
+    generation = self->generation;
 
     do {
         result = io_uring_submit(&self->ring);
+        if (result == -EINTR && PyErr_CheckSignals() < 0) {
+            return NULL;
+        }
+        if (result == -EINTR &&
+            (!self->initialized || self->generation != generation)) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "ring changed while submit was interrupted");
+            return NULL;
+        }
     } while (result == -EINTR);
     if (result < 0) {
         errno = -result;
@@ -417,6 +432,7 @@ uringcore_liburing_ring_reap(
     unsigned int max_completions = 64;
     PyObject *completed;
     unsigned int reaped = 0;
+    unsigned long long generation;
 
     if (!PyArg_ParseTupleAndKeywords(
             args,
@@ -457,6 +473,7 @@ uringcore_liburing_ring_reap(
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
         return NULL;
     }
+    generation = self->generation;
 
     completed = PyList_New(0);
     if (completed == NULL) {
@@ -465,7 +482,23 @@ uringcore_liburing_ring_reap(
     while (reaped < max_completions) {
         UringCoreLiburingRequest *request;
         struct io_uring_cqe *cqe;
-        int result = io_uring_peek_cqe(&self->ring, &cqe);
+        int result;
+
+        do {
+            result = io_uring_peek_cqe(&self->ring, &cqe);
+            if (result == -EINTR && PyErr_CheckSignals() < 0) {
+                Py_DECREF(completed);
+                return NULL;
+            }
+            if (result == -EINTR &&
+                (!self->initialized || self->generation != generation)) {
+                PyErr_SetString(
+                    PyExc_RuntimeError,
+                    "ring changed while completion reaping was interrupted");
+                Py_DECREF(completed);
+                return NULL;
+            }
+        } while (result == -EINTR);
 
         if (result == -EAGAIN) {
             break;
