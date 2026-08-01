@@ -95,7 +95,7 @@ def test_static_liburing_ring_close_releases_prepared_request_ownership():
     assert request.result == -errno.ECANCELED
 
 
-@pytest.mark.parametrize("max_completions", [-1, 0, 2**32])
+@pytest.mark.parametrize("max_completions", [-1, 0, 2**32, 2**64])
 def test_static_liburing_ring_reap_rejects_out_of_range_batch_size(
     max_completions,
 ):

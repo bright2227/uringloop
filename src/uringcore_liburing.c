@@ -411,25 +411,47 @@ uringcore_liburing_ring_reap(
     PyObject *kwargs)
 {
     static char *keyword_names[] = {"max_completions", NULL};
-    Py_ssize_t max_completions = 64;
+    PyObject *max_completions_object = NULL;
+    PyObject *max_completions_index = NULL;
+    unsigned long parsed_max_completions;
+    unsigned int max_completions = 64;
     PyObject *completed;
-    Py_ssize_t reaped = 0;
+    unsigned int reaped = 0;
 
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
-            "|n:reap",
+            "|O:reap",
             keyword_names,
-            &max_completions)) {
+            &max_completions_object)) {
         return NULL;
     }
-    if (max_completions < 1 ||
-        (size_t)max_completions > (size_t)UINT_MAX) {
-        PyErr_Format(
-            PyExc_ValueError,
-            "max_completions must be between 1 and %u",
-            UINT_MAX);
-        return NULL;
+    if (max_completions_object != NULL) {
+        max_completions_index = PyNumber_Index(max_completions_object);
+        if (max_completions_index == NULL) {
+            return NULL;
+        }
+        parsed_max_completions =
+            PyLong_AsUnsignedLong(max_completions_index);
+        Py_DECREF(max_completions_index);
+        if (parsed_max_completions == (unsigned long)-1 &&
+            PyErr_Occurred()) {
+            PyErr_Clear();
+            PyErr_Format(
+                PyExc_ValueError,
+                "max_completions must be between 1 and %u",
+                UINT_MAX);
+            return NULL;
+        }
+        if (parsed_max_completions == 0 ||
+            parsed_max_completions > UINT_MAX) {
+            PyErr_Format(
+                PyExc_ValueError,
+                "max_completions must be between 1 and %u",
+                UINT_MAX);
+            return NULL;
+        }
+        max_completions = (unsigned int)parsed_max_completions;
     }
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
