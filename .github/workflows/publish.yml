@@ -1,14 +1,17 @@
-name: Upload Package
+name: Build and upload package
 
 on:
+  pull_request:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  release-build:
+  build-sdist:
+    name: Build source distribution
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -20,9 +23,75 @@ jobs:
       - name: Prepare environment
         uses: ./.github/actions/prepare
 
-      - name: Build release distributions
-        run: |
-          uv build -v --sdist
+      - name: Build source distribution
+        run: uv build -v --sdist
+
+      - name: Check source distribution
+        run: uv run twine check dist/*
+
+      - name: Upload source distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  build-wheel:
+    name: Build ${{ matrix.build }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - cp312-manylinux_x86_64
+          - cp313-manylinux_x86_64
+          - cp312-musllinux_x86_64
+          - cp313-musllinux_x86_64
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build and test wheel
+        uses: pypa/cibuildwheel@v3.4.1
+        with:
+          package-dir: .
+          output-dir: wheelhouse
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_BUILD_VERBOSITY: "1"
+          CIBW_TEST_COMMAND: python {project}/scripts/verify_wheel.py
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: distribution-${{ matrix.build }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish:
+    name: Upload distributions to PyPI
+    if: github.event_name == 'release'
+    needs: [build-sdist, build-wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare environment
+        uses: ./.github/actions/prepare
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: distribution-*
+          path: dist
+          merge-multiple: true
 
       # TODO: switch to PyPI Trusted Publishing (OIDC) and drop the token:
       # https://docs.pypi.org/trusted-publishers/
@@ -30,5 +99,4 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          uv run twine upload --verbose --repository pypi dist/*
+        run: uv run twine upload --verbose --repository pypi dist/*
