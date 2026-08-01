@@ -1,10 +1,8 @@
-name: Build and upload package
+name: Publish package
 
 on:
-  pull_request:
   release:
     types: [published]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,14 +18,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Prepare environment
-        uses: ./.github/actions/prepare
-
       - name: Build source distribution
-        run: uv build -v --sdist
-
-      - name: Check source distribution
-        run: uv run twine check dist/*
+        uses: ./.github/actions/build-distribution
+        with:
+          kind: sdist
 
       - name: Upload source distribution
         uses: actions/upload-artifact@v4
@@ -54,15 +48,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build and test wheel
-        uses: pypa/cibuildwheel@v3.4.1
+      - name: Build wheel
+        uses: ./.github/actions/build-distribution
         with:
-          package-dir: .
-          output-dir: wheelhouse
-        env:
-          CIBW_BUILD: ${{ matrix.build }}
-          CIBW_BUILD_VERBOSITY: "1"
-          CIBW_TEST_COMMAND: python {project}/scripts/verify_wheel.py
+          kind: wheel
+          wheel-build: ${{ matrix.build }}
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
@@ -73,7 +63,6 @@ jobs:
 
   publish:
     name: Upload distributions to PyPI
-    if: github.event_name == 'release'
     needs: [build-sdist, build-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -1,0 +1,54 @@
+name: Build distribution
+description: Build and validate one source distribution or wheel target
+
+inputs:
+  kind:
+    description: Distribution kind to build (sdist or wheel)
+    required: true
+  wheel-build:
+    description: cibuildwheel build selector used when kind is wheel
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Validate build selection
+      shell: bash
+      env:
+        DISTRIBUTION_KIND: ${{ inputs.kind }}
+        WHEEL_BUILD: ${{ inputs.wheel-build }}
+      run: |
+        if [[ "$DISTRIBUTION_KIND" != "sdist" && "$DISTRIBUTION_KIND" != "wheel" ]]; then
+          echo "::error::kind must be 'sdist' or 'wheel'"
+          exit 1
+        fi
+        if [[ "$DISTRIBUTION_KIND" == "wheel" && -z "$WHEEL_BUILD" ]]; then
+          echo "::error::wheel-build is required when kind is 'wheel'"
+          exit 1
+        fi
+
+    - name: Prepare source distribution environment
+      if: ${{ inputs.kind == 'sdist' }}
+      uses: ./.github/actions/prepare
+
+    - name: Build source distribution
+      if: ${{ inputs.kind == 'sdist' }}
+      shell: bash
+      run: uv build -v --sdist
+
+    - name: Check source distribution
+      if: ${{ inputs.kind == 'sdist' }}
+      shell: bash
+      run: uv run twine check dist/*
+
+    - name: Build and test wheel
+      if: ${{ inputs.kind == 'wheel' }}
+      uses: pypa/cibuildwheel@v3.4.1
+      with:
+        package-dir: .
+        output-dir: wheelhouse
+      env:
+        CIBW_BUILD: ${{ inputs.wheel-build }}
+        CIBW_BUILD_VERBOSITY: "1"
+        CIBW_TEST_COMMAND: python {project}/scripts/verify_wheel.py
