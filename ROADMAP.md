@@ -128,6 +128,12 @@ before any percentage target is used as a gate.
 **Goal**: replace CFFI ring management while preserving the Python proactor
 API.
 
+**Status (2026-08-08)**: implementation and the Phase 1 correctness gates are
+complete. The [benchmark report](docs/phase1-benchmark-report.md) records the
+measured native/CFFI/stock-asyncio comparison and approves proceeding to Phase
+2; release performance claims still require the controlled full-profile run
+described in that report.
+
 - Add a native extension, initially named `_uringcore`, that owns SQ/CQ
   management. It must not require a system-installed liburing at runtime.
   Spike both viable implementation routes:

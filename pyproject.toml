@@ -39,6 +39,7 @@ dev = [
 # the e2e tests drive a real event loop; a wedged loop should fail the
 # test instead of hanging CI forever
 timeout = 120
+asyncio_default_fixture_loop_scope = "function"
 
 ## ruff
 [tool.ruff]

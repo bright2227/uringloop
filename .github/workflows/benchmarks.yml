@@ -1,0 +1,58 @@
+name: benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Workload matrix (full is intended for a controlled runner)
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+  schedule:
+    - cron: "17 3 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark-smoke:
+    name: Phase 1 benchmark (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare environment
+        uses: ./.github/actions/prepare
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run isolated benchmark matrix
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python benchmarks/phase1.py \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --syscalls \
+            --output "artifacts/phase1-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Upload raw benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-benchmark-${{ matrix.python-version }}
+          path: artifacts/phase1-${{ matrix.python-version }}-*.json
+

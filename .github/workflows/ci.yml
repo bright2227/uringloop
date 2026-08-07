@@ -32,10 +32,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Lint
-        run: uv run ruff check uringloop tests
+        run: uv run ruff check uringloop tests benchmarks scripts
 
       - name: Run tests
         run: uv run pytest tests/ -v
+
+      - name: Record CPython asyncio compatibility baseline
+        run: |
+          uv run python scripts/compat_baseline.py \
+            --output "artifacts/compat-${{ matrix.python-version }}.json"
+
+      - name: Upload compatibility baseline
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-${{ matrix.python-version }}
+          path: artifacts/compat-${{ matrix.python-version }}.json
 
   native-sanitizers:
     name: Native ASAN and UBSAN

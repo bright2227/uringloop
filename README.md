@@ -151,5 +151,5 @@ This project is licensed under the terms of the MIT license.
 - use registered fd and buffer
 - add signal handling
 - refactor e2e test
-- benchmark
+- run controlled full-profile benchmarks before publishing release claims
 - figure out a way to do unit/integration test

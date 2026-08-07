@@ -185,3 +185,9 @@ The public proactor now batches submission and completion through the native
 ring. Its compatibility boundary and the intentionally retained CFFI oracle
 are documented in
 [Phase 1 proactor integration](phase1-proactor-integration.md).
+
+## Measurement follow-up
+
+The reproducible native/CFFI/stock-asyncio workload matrix, syscall method,
+measured smoke results, noise limits, and Phase 2 go decision are published in
+the [Phase 1 benchmark report](phase1-benchmark-report.md).
