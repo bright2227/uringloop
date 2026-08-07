@@ -152,3 +152,11 @@ instrumentation to the native core, the CFFI extension, and the private
 vendored-liburing archive. CI builds those components from source and runs the
 real-kernel native ring tests and the event-loop e2e suites with both runtimes
 configured to stop on the first error.
+
+## Request-state follow-up
+
+The native ownership rules and cancellation race model are documented in the
+[Phase 1 request state machine](phase1-request-state-machine.md). The core
+returns immutable per-CQE completion snapshots and retains requests until the
+completion model identifies a final CQE, rather than releasing on the first
+CQE unconditionally.

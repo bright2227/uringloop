@@ -7,12 +7,13 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 2
+    assert _uringcore.ABI_VERSION == 3
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
+    assert _uringcore.Completion.__module__ == "uringloop._uringcore"
 
 
-def reap_requests(ring, count):
+def reap_completions(ring, count):
     completed = []
     deadline = time.monotonic() + 1
     while len(completed) < count and time.monotonic() < deadline:
@@ -62,11 +63,20 @@ def test_native_ring_submits_and_reaps_native_nop_requests():
     assert ring.submit() == 2
     assert [request.state for request in requests] == ["submitted", "submitted"]
 
-    completed = reap_requests(ring, 2)
+    completions = reap_completions(ring, 2)
 
-    assert set(completed) == set(requests)
+    assert {completion.request for completion in completions} == set(requests)
+    assert [completion.state for completion in completions] == [
+        "operation_complete",
+        "operation_complete",
+    ]
+    assert [completion.result for completion in completions] == [0, 0]
+    assert [completion.flags for completion in completions] == [0, 0]
+    assert [completion.final for completion in completions] == [True, True]
+    with pytest.raises(AttributeError):
+        completions[0].result = 1
     assert ring.pending == 0
-    assert [request.state for request in requests] == ["completed", "completed"]
+    assert [request.state for request in requests] == ["released", "released"]
     assert [request.done for request in requests] == [True, True]
     assert [request.cancelled for request in requests] == [False, False]
     assert [request.result for request in requests] == [0, 0]
@@ -79,8 +89,9 @@ def test_native_ring_keeps_request_alive_until_completion():
     ring.prepare_nop()
     assert ring.submit() == 1
 
-    [request] = reap_requests(ring, 1)
-    assert request.state == "completed"
+    [completion] = reap_completions(ring, 1)
+    request = completion.request
+    assert request.state == "released"
     assert request.result == 0
 
 
@@ -91,7 +102,7 @@ def test_native_ring_close_releases_prepared_request_ownership():
     ring.close()
 
     assert ring.pending == 0
-    assert request.state == "cancelled"
+    assert request.state == "released"
     assert request.done is True
     assert request.cancelled is True
     assert request.result == -errno.ECANCELED
@@ -105,3 +116,72 @@ def test_native_ring_reap_rejects_out_of_range_batch_size(
 
     with pytest.raises(ValueError, match="max_completions must be between"):
         ring.reap(max_completions)
+
+
+@pytest.mark.parametrize("delay_ns", [-1, 2**64, 1.5])
+def test_native_ring_rejects_invalid_timeout(delay_ns):
+    ring = _uringcore.Ring(8)
+
+    error = TypeError if isinstance(delay_ns, float) else ValueError
+    with pytest.raises(error):
+        ring.prepare_timeout(delay_ns)
+
+
+def test_native_ring_timeout_owns_timespec_until_completion():
+    ring = _uringcore.Ring(8)
+    request = ring.prepare_timeout(1_000_000)
+
+    assert request.kind == "timeout"
+    assert ring.submit() == 1
+    [completion] = reap_completions(ring, 1)
+
+    assert completion.request is request
+    assert completion.result == -errno.ETIME
+    assert completion.final is True
+    assert request.state == "released"
+    assert request.result == -errno.ETIME
+    assert request.cancelled is False
+
+
+def test_native_ring_models_asynchronous_cancellation_race():
+    ring = _uringcore.Ring(8)
+    target = ring.prepare_timeout(60_000_000_000)
+    assert ring.submit() == 1
+
+    cancellation = ring.prepare_cancel(target)
+    assert target.state == "cancel_pending"
+    assert cancellation.kind == "cancel"
+    assert ring.submit() == 1
+
+    completions = reap_completions(ring, 2)
+    by_request = {completion.request: completion for completion in completions}
+
+    assert by_request[cancellation].result == 0
+    assert by_request[target].result == -errno.ECANCELED
+    assert target.state == "released"
+    assert target.cancelled is True
+    assert cancellation.state == "released"
+    assert cancellation.cancelled is False
+    assert ring.pending == 0
+
+
+def test_native_ring_rejects_invalid_cancellation_targets():
+    ring = _uringcore.Ring(8)
+    other_ring = _uringcore.Ring(8)
+    prepared = ring.prepare_nop()
+    foreign = other_ring.prepare_nop()
+
+    with pytest.raises(ValueError, match="must be submitted"):
+        ring.prepare_cancel(prepared)
+    with pytest.raises(ValueError, match="not pending on this ring"):
+        ring.prepare_cancel(foreign)
+
+    assert ring.submit() == 1
+    cancellation = ring.prepare_cancel(prepared)
+    with pytest.raises(ValueError, match="not already cancelling"):
+        ring.prepare_cancel(prepared)
+
+    ring.close()
+    other_ring.close()
+    assert prepared.state == "released"
+    assert cancellation.state == "released"

@@ -11,12 +11,27 @@
 typedef enum {
     URINGCORE_REQUEST_PREPARED = 0,
     URINGCORE_REQUEST_SUBMITTED,
-    URINGCORE_REQUEST_COMPLETED,
-    URINGCORE_REQUEST_CANCELLED,
+    URINGCORE_REQUEST_CANCEL_PENDING,
+    URINGCORE_REQUEST_OPERATION_COMPLETE,
+    URINGCORE_REQUEST_NOTIFICATION_PENDING,
+    URINGCORE_REQUEST_RELEASED,
 } UringCoreRequestState;
+
+typedef enum {
+    URINGCORE_REQUEST_NOP = 0,
+    URINGCORE_REQUEST_TIMEOUT,
+    URINGCORE_REQUEST_CANCEL,
+} UringCoreRequestKind;
+
+typedef enum {
+    URINGCORE_COMPLETION_ONE_SHOT = 0,
+    URINGCORE_COMPLETION_MULTISHOT,
+    URINGCORE_COMPLETION_NOTIFICATION,
+} UringCoreCompletionModel;
 
 typedef struct UringCoreLiburingRing UringCoreLiburingRing;
 typedef struct UringCoreLiburingRequest UringCoreLiburingRequest;
+typedef struct UringCoreLiburingCompletion UringCoreLiburingCompletion;
 
 struct UringCoreLiburingRequest {
     PyObject_HEAD
@@ -24,8 +39,22 @@ struct UringCoreLiburingRequest {
     UringCoreLiburingRequest *previous;
     UringCoreLiburingRequest *next;
     UringCoreRequestState state;
+    UringCoreRequestKind kind;
+    UringCoreCompletionModel completion_model;
+    struct __kernel_timespec timeout;
+    PyObject *cancel_target;
     int result;
     unsigned int flags;
+    int cancelled;
+};
+
+struct UringCoreLiburingCompletion {
+    PyObject_HEAD
+    UringCoreLiburingRequest *request;
+    UringCoreRequestState state;
+    int result;
+    unsigned int flags;
+    int final;
 };
 
 struct UringCoreLiburingRing {
@@ -43,6 +72,7 @@ struct UringCoreLiburingRing {
 };
 
 static PyTypeObject UringCoreLiburingRequestType;
+static PyTypeObject UringCoreLiburingCompletionType;
 
 static void
 uringcore_liburing_request_link(
@@ -87,9 +117,6 @@ uringcore_liburing_request_unlink(UringCoreLiburingRequest *request)
         ring->request_tail = request->previous;
     }
     ring->pending--;
-    if (request->state == URINGCORE_REQUEST_PREPARED) {
-        ring->prepared--;
-    }
     request->ring = NULL;
     request->previous = NULL;
     request->next = NULL;
@@ -109,9 +136,10 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
         self->initialized = 0;
     }
     while ((request = self->request_head) != NULL) {
-        request->state = URINGCORE_REQUEST_CANCELLED;
+        request->state = URINGCORE_REQUEST_RELEASED;
         request->result = -ECANCELED;
         request->flags = 0;
+        request->cancelled = 1;
         uringcore_liburing_request_unlink(request);
     }
     self->pending = 0;
@@ -121,6 +149,7 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
 static void
 uringcore_liburing_request_dealloc(UringCoreLiburingRequest *self)
 {
+    Py_XDECREF(self->cancel_target);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -129,9 +158,7 @@ uringcore_liburing_request_get_done(
     UringCoreLiburingRequest *self,
     void *Py_UNUSED(context))
 {
-    return PyBool_FromLong(
-        self->state == URINGCORE_REQUEST_COMPLETED ||
-        self->state == URINGCORE_REQUEST_CANCELLED);
+    return PyBool_FromLong(self->state == URINGCORE_REQUEST_RELEASED);
 }
 
 static PyObject *
@@ -139,7 +166,7 @@ uringcore_liburing_request_get_cancelled(
     UringCoreLiburingRequest *self,
     void *Py_UNUSED(context))
 {
-    return PyBool_FromLong(self->state == URINGCORE_REQUEST_CANCELLED);
+    return PyBool_FromLong(self->cancelled);
 }
 
 static PyObject *
@@ -147,8 +174,9 @@ uringcore_liburing_request_get_result(
     UringCoreLiburingRequest *self,
     void *Py_UNUSED(context))
 {
-    if (self->state != URINGCORE_REQUEST_COMPLETED &&
-        self->state != URINGCORE_REQUEST_CANCELLED) {
+    if (self->state != URINGCORE_REQUEST_OPERATION_COMPLETE &&
+        self->state != URINGCORE_REQUEST_NOTIFICATION_PENDING &&
+        self->state != URINGCORE_REQUEST_RELEASED) {
         Py_RETURN_NONE;
     }
     return PyLong_FromLong(self->result);
@@ -168,17 +196,47 @@ uringcore_liburing_request_get_state(
         case URINGCORE_REQUEST_SUBMITTED:
             state = "submitted";
             break;
-        case URINGCORE_REQUEST_COMPLETED:
-            state = "completed";
+        case URINGCORE_REQUEST_CANCEL_PENDING:
+            state = "cancel_pending";
             break;
-        case URINGCORE_REQUEST_CANCELLED:
-            state = "cancelled";
+        case URINGCORE_REQUEST_OPERATION_COMPLETE:
+            state = "operation_complete";
+            break;
+        case URINGCORE_REQUEST_NOTIFICATION_PENDING:
+            state = "notification_pending";
+            break;
+        case URINGCORE_REQUEST_RELEASED:
+            state = "released";
             break;
         default:
             PyErr_SetString(PyExc_SystemError, "request has an invalid state");
             return NULL;
     }
     return PyUnicode_FromString(state);
+}
+
+static PyObject *
+uringcore_liburing_request_get_kind(
+    UringCoreLiburingRequest *self,
+    void *Py_UNUSED(context))
+{
+    const char *kind;
+
+    switch (self->kind) {
+        case URINGCORE_REQUEST_NOP:
+            kind = "nop";
+            break;
+        case URINGCORE_REQUEST_TIMEOUT:
+            kind = "timeout";
+            break;
+        case URINGCORE_REQUEST_CANCEL:
+            kind = "cancel";
+            break;
+        default:
+            PyErr_SetString(PyExc_SystemError, "request has an invalid kind");
+            return NULL;
+    }
+    return PyUnicode_FromString(kind);
 }
 
 static PyGetSetDef uringcore_liburing_request_getset[] = {
@@ -210,6 +268,13 @@ static PyGetSetDef uringcore_liburing_request_getset[] = {
         PyDoc_STR("Current native request lifecycle state."),
         NULL,
     },
+    {
+        "kind",
+        (getter)uringcore_liburing_request_get_kind,
+        NULL,
+        PyDoc_STR("The native operation kind."),
+        NULL,
+    },
     {NULL},
 };
 
@@ -237,6 +302,103 @@ static PyTypeObject UringCoreLiburingRequestType = {
     .tp_doc = uringcore_liburing_request_doc,
     .tp_members = uringcore_liburing_request_members,
     .tp_getset = uringcore_liburing_request_getset,
+};
+
+static void
+uringcore_liburing_completion_dealloc(UringCoreLiburingCompletion *self)
+{
+    Py_XDECREF(self->request);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *
+uringcore_liburing_completion_get_state(
+    UringCoreLiburingCompletion *self,
+    void *Py_UNUSED(context))
+{
+    const char *state;
+
+    switch (self->state) {
+        case URINGCORE_REQUEST_SUBMITTED:
+            state = "submitted";
+            break;
+        case URINGCORE_REQUEST_CANCEL_PENDING:
+            state = "cancel_pending";
+            break;
+        case URINGCORE_REQUEST_OPERATION_COMPLETE:
+            state = "operation_complete";
+            break;
+        case URINGCORE_REQUEST_NOTIFICATION_PENDING:
+            state = "notification_pending";
+            break;
+        case URINGCORE_REQUEST_RELEASED:
+            state = "released";
+            break;
+        default:
+            PyErr_SetString(
+                PyExc_SystemError,
+                "completion has an invalid request state");
+            return NULL;
+    }
+    return PyUnicode_FromString(state);
+}
+
+static PyMemberDef uringcore_liburing_completion_members[] = {
+    {
+        "request",
+        T_OBJECT_EX,
+        offsetof(UringCoreLiburingCompletion, request),
+        READONLY,
+        PyDoc_STR("The request that produced this completion."),
+    },
+    {
+        "result",
+        T_INT,
+        offsetof(UringCoreLiburingCompletion, result),
+        READONLY,
+        PyDoc_STR("Raw CQE result."),
+    },
+    {
+        "flags",
+        T_UINT,
+        offsetof(UringCoreLiburingCompletion, flags),
+        READONLY,
+        PyDoc_STR("Flags from the completion queue entry."),
+    },
+    {
+        "final",
+        T_BOOL,
+        offsetof(UringCoreLiburingCompletion, final),
+        READONLY,
+        PyDoc_STR("Whether the request released kernel ownership."),
+    },
+    {NULL},
+};
+
+static PyGetSetDef uringcore_liburing_completion_getset[] = {
+    {
+        "state",
+        (getter)uringcore_liburing_completion_get_state,
+        NULL,
+        PyDoc_STR("Request state represented by this CQE."),
+        NULL,
+    },
+    {NULL},
+};
+
+PyDoc_STRVAR(
+    uringcore_liburing_completion_doc,
+    "An immutable snapshot of one completion queue entry.");
+
+static PyTypeObject UringCoreLiburingCompletionType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "uringloop._uringcore.Completion",
+    .tp_basicsize = sizeof(UringCoreLiburingCompletion),
+    .tp_dealloc = (destructor)uringcore_liburing_completion_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = uringcore_liburing_completion_doc,
+    .tp_members = uringcore_liburing_completion_members,
+    .tp_getset = uringcore_liburing_completion_getset,
 };
 
 static PyObject *
@@ -325,18 +487,12 @@ uringcore_liburing_ring_close(
     Py_RETURN_NONE;
 }
 
-static PyObject *
-uringcore_liburing_ring_prepare_nop(
-    UringCoreLiburingRing *self,
-    PyObject *Py_UNUSED(ignored))
+static UringCoreLiburingRequest *
+uringcore_liburing_request_new(
+    UringCoreRequestKind kind,
+    UringCoreCompletionModel completion_model)
 {
     UringCoreLiburingRequest *request;
-    struct io_uring_sqe *sqe;
-
-    if (!self->initialized) {
-        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
-        return NULL;
-    }
 
     request = (UringCoreLiburingRequest *)
         UringCoreLiburingRequestType.tp_alloc(
@@ -348,19 +504,163 @@ uringcore_liburing_ring_prepare_nop(
     request->previous = NULL;
     request->next = NULL;
     request->state = URINGCORE_REQUEST_PREPARED;
+    request->kind = kind;
+    request->completion_model = completion_model;
+    memset(&request->timeout, 0, sizeof(request->timeout));
+    request->cancel_target = NULL;
     request->result = 0;
     request->flags = 0;
+    request->cancelled = 0;
+    return request;
+}
 
+static struct io_uring_sqe *
+uringcore_liburing_ring_get_sqe(UringCoreLiburingRing *self)
+{
+    struct io_uring_sqe *sqe;
+
+    if (!self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
     sqe = io_uring_get_sqe(&self->ring);
     if (sqe == NULL) {
-        Py_DECREF(request);
         PyErr_SetString(
             PyExc_BufferError,
             "submission queue is full; call submit() before preparing more requests");
         return NULL;
     }
+    return sqe;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_nop(
+    UringCoreLiburingRing *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    request = uringcore_liburing_request_new(
+        URINGCORE_REQUEST_NOP,
+        URINGCORE_COMPLETION_ONE_SHOT);
+    if (request == NULL) {
+        return NULL;
+    }
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
     io_uring_prep_nop(sqe);
     io_uring_sqe_set_data(sqe, request);
+    uringcore_liburing_request_link(self, request);
+    return (PyObject *)request;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_timeout(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {"delay_ns", NULL};
+    PyObject *delay_object;
+    PyObject *delay_index;
+    unsigned long long delay_ns;
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwargs, "O:prepare_timeout", keyword_names, &delay_object)) {
+        return NULL;
+    }
+    delay_index = PyNumber_Index(delay_object);
+    if (delay_index == NULL) {
+        return NULL;
+    }
+    delay_ns = PyLong_AsUnsignedLongLong(delay_index);
+    Py_DECREF(delay_index);
+    if ((delay_ns == ULLONG_MAX && PyErr_Occurred()) ||
+        delay_ns > (unsigned long long)LLONG_MAX) {
+        PyErr_Clear();
+        PyErr_SetString(
+            PyExc_ValueError,
+            "delay_ns must be between 0 and 9223372036854775807");
+        return NULL;
+    }
+
+    request = uringcore_liburing_request_new(
+        URINGCORE_REQUEST_TIMEOUT,
+        URINGCORE_COMPLETION_ONE_SHOT);
+    if (request == NULL) {
+        return NULL;
+    }
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    request->timeout.tv_sec = (__kernel_time64_t)(delay_ns / 1000000000ULL);
+    request->timeout.tv_nsec = (long)(delay_ns % 1000000000ULL);
+    io_uring_prep_timeout(sqe, &request->timeout, 0, 0);
+    io_uring_sqe_set_data(sqe, request);
+    uringcore_liburing_request_link(self, request);
+    return (PyObject *)request;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_cancel(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {"request", NULL};
+    UringCoreLiburingRequest *target;
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "O!:prepare_cancel",
+            keyword_names,
+            &UringCoreLiburingRequestType,
+            &target)) {
+        return NULL;
+    }
+    if (!self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (target->ring != self) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "request is not pending on this ring");
+        return NULL;
+    }
+    if (target->state != URINGCORE_REQUEST_SUBMITTED) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "request must be submitted and not already cancelling");
+        return NULL;
+    }
+
+    request = uringcore_liburing_request_new(
+        URINGCORE_REQUEST_CANCEL,
+        URINGCORE_COMPLETION_ONE_SHOT);
+    if (request == NULL) {
+        return NULL;
+    }
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    request->cancel_target = Py_NewRef((PyObject *)target);
+    io_uring_prep_cancel(sqe, target, 0);
+    io_uring_sqe_set_data(sqe, request);
+    target->state = URINGCORE_REQUEST_CANCEL_PENDING;
     uringcore_liburing_request_link(self, request);
     return (PyObject *)request;
 }
@@ -417,6 +717,31 @@ uringcore_liburing_ring_submit(
         return NULL;
     }
     return PyLong_FromLong(result);
+}
+
+static UringCoreLiburingCompletion *
+uringcore_liburing_completion_new(
+    UringCoreLiburingRequest *request,
+    UringCoreRequestState state,
+    int result,
+    unsigned int flags,
+    int final)
+{
+    UringCoreLiburingCompletion *completion;
+
+    completion = (UringCoreLiburingCompletion *)
+        UringCoreLiburingCompletionType.tp_alloc(
+            &UringCoreLiburingCompletionType, 0);
+    if (completion == NULL) {
+        return NULL;
+    }
+    completion->request = (UringCoreLiburingRequest *)Py_NewRef(
+        (PyObject *)request);
+    completion->state = state;
+    completion->result = result;
+    completion->flags = flags;
+    completion->final = final;
+    return completion;
 }
 
 static PyObject *
@@ -480,8 +805,11 @@ uringcore_liburing_ring_reap(
         return NULL;
     }
     while (reaped < max_completions) {
+        UringCoreLiburingCompletion *completion;
         UringCoreLiburingRequest *request;
+        UringCoreRequestState completion_state;
         struct io_uring_cqe *cqe;
+        int final;
         int result;
 
         do {
@@ -512,7 +840,9 @@ uringcore_liburing_ring_reap(
 
         request = (UringCoreLiburingRequest *)io_uring_cqe_get_data(cqe);
         if (request == NULL || request->ring != self ||
-            request->state != URINGCORE_REQUEST_SUBMITTED) {
+            (request->state != URINGCORE_REQUEST_SUBMITTED &&
+             request->state != URINGCORE_REQUEST_CANCEL_PENDING &&
+             request->state != URINGCORE_REQUEST_NOTIFICATION_PENDING)) {
             io_uring_cqe_seen(&self->ring, cqe);
             PyErr_SetString(
                 PyExc_SystemError,
@@ -521,16 +851,81 @@ uringcore_liburing_ring_reap(
             return NULL;
         }
 
-        request->state = URINGCORE_REQUEST_COMPLETED;
-        request->result = cqe->res;
-        request->flags = cqe->flags;
-        io_uring_cqe_seen(&self->ring, cqe);
-        if (PyList_Append(completed, (PyObject *)request) < 0) {
-            uringcore_liburing_request_unlink(request);
+        final = 0;
+        if (cqe->flags & IORING_CQE_F_NOTIF) {
+            if (request->completion_model != URINGCORE_COMPLETION_NOTIFICATION ||
+                request->state != URINGCORE_REQUEST_NOTIFICATION_PENDING) {
+                io_uring_cqe_seen(&self->ring, cqe);
+                PyErr_SetString(
+                    PyExc_SystemError,
+                    "unexpected notification completion queue entry");
+                Py_DECREF(completed);
+                return NULL;
+            }
+            completion_state = URINGCORE_REQUEST_NOTIFICATION_PENDING;
+            final = 1;
+        }
+        else if (request->completion_model ==
+                 URINGCORE_COMPLETION_NOTIFICATION) {
+            completion_state = URINGCORE_REQUEST_OPERATION_COMPLETE;
+            final = !(cqe->flags & IORING_CQE_F_MORE);
+        }
+        else if (request->completion_model == URINGCORE_COMPLETION_MULTISHOT &&
+                 (cqe->flags & IORING_CQE_F_MORE)) {
+            completion_state = request->state;
+        }
+        else {
+            if (cqe->flags & IORING_CQE_F_MORE) {
+                io_uring_cqe_seen(&self->ring, cqe);
+                PyErr_SetString(
+                    PyExc_SystemError,
+                    "one-shot request produced a multi-completion CQE");
+                Py_DECREF(completed);
+                return NULL;
+            }
+            completion_state = URINGCORE_REQUEST_OPERATION_COMPLETE;
+            final = 1;
+        }
+
+        completion = uringcore_liburing_completion_new(
+            request,
+            completion_state,
+            cqe->res,
+            cqe->flags,
+            final);
+        if (completion == NULL) {
             Py_DECREF(completed);
             return NULL;
         }
-        uringcore_liburing_request_unlink(request);
+
+        request->state = completion_state;
+        if (!(cqe->flags & IORING_CQE_F_NOTIF)) {
+            request->result = cqe->res;
+            if (cqe->res == -ECANCELED) {
+                request->cancelled = 1;
+            }
+        }
+        request->flags = cqe->flags;
+        if (final) {
+            request->state = URINGCORE_REQUEST_RELEASED;
+        }
+        else if (request->completion_model ==
+                 URINGCORE_COMPLETION_NOTIFICATION) {
+            request->state = URINGCORE_REQUEST_NOTIFICATION_PENDING;
+        }
+        io_uring_cqe_seen(&self->ring, cqe);
+        if (PyList_Append(completed, (PyObject *)completion) < 0) {
+            Py_DECREF(completion);
+            if (final) {
+                uringcore_liburing_request_unlink(request);
+            }
+            Py_DECREF(completed);
+            return NULL;
+        }
+        Py_DECREF(completion);
+        if (final) {
+            uringcore_liburing_request_unlink(request);
+        }
         reaped++;
     }
     return completed;
@@ -573,6 +968,18 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         PyDoc_STR("Prepare one native no-op request without submitting it."),
     },
     {
+        "prepare_timeout",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_timeout),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare a relative timeout expressed in nanoseconds."),
+    },
+    {
+        "prepare_cancel",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_cancel),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare asynchronous cancellation of a submitted request."),
+    },
+    {
         "submit",
         (PyCFunction)uringcore_liburing_ring_submit,
         METH_NOARGS,
@@ -582,7 +989,7 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         "reap",
         _PyCFunction_CAST(uringcore_liburing_ring_reap),
         METH_VARARGS | METH_KEYWORDS,
-        PyDoc_STR("Return up to max_completions completed native requests."),
+        PyDoc_STR("Return immutable snapshots of up to max_completions CQEs."),
     },
     {
         "close",
@@ -684,6 +1091,9 @@ PyInit__uringcore(void)
     if (PyType_Ready(&UringCoreLiburingRequestType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&UringCoreLiburingCompletionType) < 0) {
+        return NULL;
+    }
     if (PyType_Ready(&UringCoreLiburingRingType) < 0) {
         return NULL;
     }
@@ -707,7 +1117,14 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 2) < 0) {
+    if (PyModule_AddObjectRef(
+            module,
+            "Completion",
+            (PyObject *)&UringCoreLiburingCompletionType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 3) < 0) {
         Py_DECREF(module);
         return NULL;
     }
