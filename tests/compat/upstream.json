@@ -1,0 +1,35 @@
+{
+  "adaptations": {
+    "test_call_soon_callbacks_preserve_fifo_order": "test_events.py::test_call_soon",
+    "test_cancelled_timer_never_runs": "test_base_events.py::test_call_later",
+    "test_task_cancellation_preserves_message": "test_tasks.py::test_cancel_with_message_then_future_result",
+    "test_streams_round_trip_and_eof": "test_streams.py::test_start_server",
+    "test_executor_completion_wakes_idle_loop": "test_events.py::test_run_in_executor",
+    "test_callback_exception_reaches_exception_handler": "test_events.py::test_callback_with_exception",
+    "test_subprocess_exit_and_output": "test_subprocess.py::test_communicate"
+  },
+  "versions": {
+    "3.12": {
+      "commit": "f6650f9ad73359051f3e558c2431a109bc016664",
+      "tag": "v3.12.3",
+      "sources": {
+        "test_base_events.py": "7fe427b09ed190da2542bdc606d725e1dd4d366a9bbeb71361a0c8b54fe28aff",
+        "test_events.py": "ce60895c925f0dd6cf8e49f77a886d36d42e418f7db97e73a03636a1b26529da",
+        "test_streams.py": "cf8ff5af2e4b7a0e399c73d02da96d786104fb53e6f6bdc5807135ab1249bc84",
+        "test_subprocess.py": "a97af327e41def4b978b02fe4fcc448f046826706e8ae0b4b2185a986b1bde30",
+        "test_tasks.py": "76f108aa1b1c6fb99b5788fd50add08da9bb2960fcbfbbbc71a83d62eb98bfb5"
+      }
+    },
+    "3.13": {
+      "commit": "60403a5409ff2c3f3b07dd2ca91a7a3e096839c7",
+      "tag": "v3.13.0",
+      "sources": {
+        "test_base_events.py": "96eef257b5903910928b68f83e63e51d72eed1e768831f39574702423432baf3",
+        "test_events.py": "0d7465adca8de4682396404a3ddad7f310038361a1352685542c023f4598fa18",
+        "test_streams.py": "a61458896b305fd0d3badb15f791db14f1f0590137939984894e05c12847a192",
+        "test_subprocess.py": "a052fda324bc9d006a43f8b1b660ddc97f317d975a73f86f72e83ff81e31e982",
+        "test_tasks.py": "00cc7490b5ea8a5135fb226ed93a6570b5f0143e1f8b9edc7666a554ba54809d"
+      }
+    }
+  }
+}

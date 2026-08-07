@@ -17,6 +17,12 @@ def test_benchmark_percentiles_are_reported_in_microseconds():
     assert percentile([1_000, 2_000, 3_000], 0.99) == 3.0
 
 
+def test_benchmark_operation_counts_match_each_api():
+    assert Workload("socket", 4, 64, 10).operations == 40
+    assert Workload("streams", 4, 64, 10).operations == 40
+    assert Workload("file", 1, 4096, 10).operations == 10
+
+
 def test_strace_summary_extracts_per_syscall_counts(tmp_path):
     summary = tmp_path / "strace.txt"
     summary.write_text(

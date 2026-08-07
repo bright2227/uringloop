@@ -3,20 +3,39 @@
 
 import argparse
 from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
 import platform
 import subprocess
 import sys
 import tempfile
+from urllib.request import urlopen
 import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM_REVISIONS = {
-    "3.12": "v3.12.3",
-    "3.13": "v3.13.0",
-}
+UPSTREAM_MANIFEST = ROOT / "tests" / "compat" / "upstream.json"
+
+
+def load_upstream(version: str) -> tuple[dict, dict]:
+    manifest = json.loads(UPSTREAM_MANIFEST.read_text())
+    try:
+        return manifest, manifest["versions"][version]
+    except KeyError as error:
+        raise SystemExit(f"no tracked CPython asyncio revision for Python {version}") from error
+
+
+def verify_upstream_sources(upstream: dict) -> list[dict[str, str]]:
+    verified = []
+    for filename, expected in upstream["sources"].items():
+        url = f"https://raw.githubusercontent.com/python/cpython/{upstream['commit']}/Lib/test/test_asyncio/{filename}"
+        with urlopen(url, timeout=30) as response:
+            digest = hashlib.sha256(response.read()).hexdigest()
+        if digest != expected:
+            raise RuntimeError(f"upstream digest mismatch for {filename}: expected {expected}, found {digest}")
+        verified.append({"file": filename, "sha256": digest, "url": url})
+    return verified
 
 
 def summarize(xml_path: Path) -> dict:
@@ -51,10 +70,11 @@ def summarize(xml_path: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--verify-upstream", action="store_true")
     args = parser.parse_args()
     version = f"{sys.version_info.major}.{sys.version_info.minor}"
-    if version not in UPSTREAM_REVISIONS:
-        raise SystemExit(f"no tracked CPython asyncio revision for Python {version}")
+    manifest, upstream = load_upstream(version)
+    verified_sources = verify_upstream_sources(upstream) if args.verify_upstream else []
 
     with tempfile.TemporaryDirectory() as directory:
         xml_path = Path(directory) / "compat.xml"
@@ -70,7 +90,11 @@ def main() -> int:
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "cpython_asyncio_revision": UPSTREAM_REVISIONS[version],
+        "cpython_asyncio_revision": upstream["tag"],
+        "cpython_commit": upstream["commit"],
+        "adaptations": manifest["adaptations"],
+        "upstream_sources_verified": args.verify_upstream,
+        "verified_sources": verified_sources,
         "summary": summary,
     }
     serialized = json.dumps(document, indent=2, sort_keys=True) + "\n"

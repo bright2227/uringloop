@@ -38,6 +38,10 @@ class Workload:
     message_size: int
     rounds: int
 
+    @property
+    def operations(self) -> int:
+        return self.rounds if self.api == "file" else self.connections * self.rounds
+
 
 def percentile(values: list[int], fraction: float) -> float:
     ordered = sorted(values)
@@ -146,7 +150,7 @@ async def file_workload(workload: Workload, backend: str) -> list[int]:
         file.seek(0)
         for _ in range(workload.rounds):
             started = time.perf_counter_ns()
-            if backend == "asyncio":
+            if backend in {"asyncio", "uvloop"}:
                 data = await asyncio.to_thread(file.read, workload.message_size)
             else:
                 data = await loop._proactor.recv(file, workload.message_size)  # type: ignore[attr-defined]
@@ -163,49 +167,54 @@ def make_loop(backend: str) -> asyncio.AbstractEventLoop:
         return IoUringProactorEventLoop(_CffiIoUringProactor())
     if backend == "asyncio":
         return asyncio.new_event_loop()
+    if backend == "uvloop":
+        try:
+            import uvloop
+        except ImportError as error:
+            raise RuntimeError("uvloop backend requires the benchmark dependency group") from error
+        return uvloop.new_event_loop()
     raise ValueError(f"unknown backend: {backend}")
 
 
-def run_workload(backend: str, workload: Workload) -> list[int]:
+def run_workload(loop: asyncio.AbstractEventLoop, backend: str, workload: Workload) -> list[int]:
+    if workload.api == "socket":
+        coroutine = socket_workload(workload)
+    elif workload.api == "streams":
+        coroutine = streams_workload(workload)
+    elif workload.api == "file":
+        coroutine = file_workload(workload, backend)
+    else:
+        raise ValueError(f"unknown API: {workload.api}")
+    return loop.run_until_complete(coroutine)
+
+
+def worker_result(backend: str, workload: Workload, warmup: int, repeats: int) -> dict[str, Any]:
     loop = make_loop(backend)
     asyncio.set_event_loop(loop)
     try:
-        if workload.api == "socket":
-            coroutine = socket_workload(workload)
-        elif workload.api == "streams":
-            coroutine = streams_workload(workload)
-        elif workload.api == "file":
-            coroutine = file_workload(workload, backend)
-        else:
-            raise ValueError(f"unknown API: {workload.api}")
-        return loop.run_until_complete(coroutine)
+        for _ in range(warmup):
+            run_workload(loop, backend, workload)
+
+        samples = []
+        all_latencies = []
+        for _ in range(repeats):
+            cpu_started = time.process_time_ns()
+            wall_started = time.perf_counter_ns()
+            latencies = run_workload(loop, backend, workload)
+            wall_ns = time.perf_counter_ns() - wall_started
+            cpu_ns = time.process_time_ns() - cpu_started
+            all_latencies.extend(latencies)
+            samples.append(
+                {
+                    "wall_seconds": wall_ns / 1_000_000_000,
+                    "cpu_seconds": cpu_ns / 1_000_000_000,
+                    "operations_per_second": workload.operations * 1_000_000_000 / wall_ns,
+                }
+            )
     finally:
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
         asyncio.set_event_loop(None)
-
-
-def worker_result(backend: str, workload: Workload, warmup: int, repeats: int) -> dict[str, Any]:
-    for _ in range(warmup):
-        run_workload(backend, workload)
-
-    samples = []
-    all_latencies = []
-    operations = workload.connections * workload.rounds
-    for _ in range(repeats):
-        cpu_started = time.process_time_ns()
-        wall_started = time.perf_counter_ns()
-        latencies = run_workload(backend, workload)
-        wall_ns = time.perf_counter_ns() - wall_started
-        cpu_ns = time.process_time_ns() - cpu_started
-        all_latencies.extend(latencies)
-        samples.append(
-            {
-                "wall_seconds": wall_ns / 1_000_000_000,
-                "cpu_seconds": cpu_ns / 1_000_000_000,
-                "operations_per_second": operations * 1_000_000_000 / wall_ns,
-            }
-        )
 
     wall_samples = [sample["wall_seconds"] for sample in samples]
     throughput_samples = [sample["operations_per_second"] for sample in samples]
@@ -340,7 +349,7 @@ def environment_metadata() -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
-    parser.add_argument("--backend", choices=("native", "cffi", "asyncio"), default="native")
+    parser.add_argument("--backend", choices=("native", "cffi", "asyncio", "uvloop"), default="native")
     parser.add_argument("--api", choices=("socket", "streams", "file"), default="socket")
     parser.add_argument("--connections", type=int, default=1)
     parser.add_argument("--message-size", type=int, default=64)
@@ -368,7 +377,7 @@ def main() -> int:
     else:
         results = []
         for workload in matrix(args.profile):
-            for backend in ("native", "cffi", "asyncio"):
+            for backend in ("native", "cffi", "asyncio", "uvloop"):
                 results.append(run_isolated(backend, workload, args.warmup, args.repeats, args.syscalls))
         document = {
             "schema_version": 1,

@@ -42,6 +42,7 @@ jobs:
 
       - name: Run isolated benchmark matrix
         run: |
+          uv sync --group dev --group benchmark
           profile="${{ github.event.inputs.profile || 'smoke' }}"
           uv run python benchmarks/phase1.py \
             --profile "$profile" \
@@ -55,4 +56,3 @@ jobs:
         with:
           name: phase1-benchmark-${{ matrix.python-version }}
           path: artifacts/phase1-${{ matrix.python-version }}-*.json
-

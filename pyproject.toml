@@ -33,6 +33,9 @@ dev = [
     "ruff>=0.11.4",
     "twine>=6.1.0",
 ]
+benchmark = [
+    "uvloop==0.21.0; sys_platform == 'linux'",
+]
 
 ## pytest
 [tool.pytest.ini_options]

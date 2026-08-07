@@ -40,6 +40,7 @@ jobs:
       - name: Record CPython asyncio compatibility baseline
         run: |
           uv run python scripts/compat_baseline.py \
+            --verify-upstream \
             --output "artifacts/compat-${{ matrix.python-version }}.json"
 
       - name: Upload compatibility baseline
