@@ -166,3 +166,9 @@ CQE unconditionally.
 Explicit CQ sizing, overflow visibility, dropped-CQE detection, and injectable
 runtime opcode probing are documented in
 [Phase 1 completion queues and runtime probing](phase1-cq-and-probing.md).
+
+## Provided-buffer follow-up
+
+The bounded allocation, registration, accounting, and return rules are
+documented in the
+[Phase 1 provided-buffer pool](phase1-provided-buffer-pool.md).

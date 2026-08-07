@@ -7,7 +7,7 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 4
+    assert _uringcore.ABI_VERSION == 5
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
@@ -245,3 +245,46 @@ def test_native_ring_detects_and_drains_cq_pressure():
     assert ring.pending == 0
     assert ring.cq_dropped == 0
     assert ring.cq_overflowed is False
+
+
+def test_native_ring_registers_bounded_provided_buffer_pool():
+    ring = _uringcore.Ring(8)
+
+    ring.setup_buffer_pool(entries=8, buffer_size=4096, group_id=7)
+
+    assert ring.buffer_pool_entries == 8
+    assert ring.buffer_size == 4096
+    assert ring.buffer_group_id == 7
+    assert ring.buffer_pool_bytes == 8 * 4096
+    assert ring.buffers_available == 8
+    assert ring.buffers_in_use == 0
+    with pytest.raises(RuntimeError, match="already registered"):
+        ring.setup_buffer_pool(8, 4096)
+
+    ring.close()
+    assert ring.buffer_pool_entries == 0
+    assert ring.buffer_pool_bytes == 0
+
+
+@pytest.mark.parametrize("entries", [0, 3, 32769, 2**32])
+def test_native_ring_rejects_invalid_buffer_pool_entries(entries):
+    ring = _uringcore.Ring(8)
+
+    with pytest.raises(ValueError, match="entries"):
+        ring.setup_buffer_pool(entries, 1024)
+
+
+@pytest.mark.parametrize("buffer_size", [-1, 0, 2**32])
+def test_native_ring_rejects_invalid_buffer_size(buffer_size):
+    ring = _uringcore.Ring(8)
+
+    with pytest.raises(ValueError, match="buffer_size"):
+        ring.setup_buffer_pool(8, buffer_size)
+
+
+@pytest.mark.parametrize("group_id", [-1, 65536, 2**64])
+def test_native_ring_rejects_invalid_buffer_group(group_id):
+    ring = _uringcore.Ring(8)
+
+    with pytest.raises(ValueError, match="group_id"):
+        ring.setup_buffer_pool(8, 1024, group_id)

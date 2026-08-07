@@ -5,7 +5,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <liburing.h>
+#include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef enum {
@@ -71,10 +73,37 @@ struct UringCoreLiburingRing {
     unsigned int cq_dropped;
     unsigned long long generation;
     PyObject *supported_opcodes;
+    struct io_uring_buf_ring *buffer_ring;
+    unsigned char *buffer_storage;
+    unsigned int buffer_entries;
+    unsigned int buffer_size;
+    unsigned int buffer_group_id;
+    unsigned int buffers_available;
+    unsigned int buffers_in_use;
 };
 
 static PyTypeObject UringCoreLiburingRequestType;
 static PyTypeObject UringCoreLiburingCompletionType;
+
+static void
+uringcore_liburing_ring_free_buffer_pool(UringCoreLiburingRing *self)
+{
+    if (self->buffer_ring != NULL && self->initialized) {
+        io_uring_free_buf_ring(
+            &self->ring,
+            self->buffer_ring,
+            self->buffer_entries,
+            (int)self->buffer_group_id);
+    }
+    PyMem_RawFree(self->buffer_storage);
+    self->buffer_ring = NULL;
+    self->buffer_storage = NULL;
+    self->buffer_entries = 0;
+    self->buffer_size = 0;
+    self->buffer_group_id = 0;
+    self->buffers_available = 0;
+    self->buffers_in_use = 0;
+}
 
 static void
 uringcore_liburing_request_link(
@@ -132,6 +161,7 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
     UringCoreLiburingRequest *request;
 
     if (self->initialized) {
+        uringcore_liburing_ring_free_buffer_pool(self);
         self->cq_dropped = *self->ring.cq.koverflow;
         self->generation++;
         io_uring_queue_exit(&self->ring);
@@ -590,6 +620,13 @@ uringcore_liburing_ring_init(
             return -1;
         }
     }
+    if (self->buffers_in_use != 0) {
+        Py_XDECREF(supported_opcodes);
+        PyErr_SetString(
+            PyExc_BufferError,
+            "cannot reinitialize a ring while provided buffers are in use");
+        return -1;
+    }
 
     uringcore_liburing_ring_close_resources(self);
     Py_CLEAR(self->supported_opcodes);
@@ -636,7 +673,130 @@ uringcore_liburing_ring_close(
     UringCoreLiburingRing *self,
     PyObject *Py_UNUSED(ignored))
 {
+    if (self->buffers_in_use != 0) {
+        PyErr_SetString(
+            PyExc_BufferError,
+            "cannot close a ring while provided buffers are in use");
+        return NULL;
+    }
     uringcore_liburing_ring_close_resources(self);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+uringcore_liburing_ring_setup_buffer_pool(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {
+        "entries",
+        "buffer_size",
+        "group_id",
+        NULL,
+    };
+    PyObject *entries_object;
+    PyObject *buffer_size_object;
+    PyObject *group_id_object = NULL;
+    PyObject *group_id_index = NULL;
+    unsigned int entries;
+    unsigned int buffer_size;
+    unsigned long parsed_group_id = 0;
+    size_t allocation_size;
+    unsigned char *storage;
+    struct io_uring_buf_ring *buffer_ring;
+    int mask;
+    int result;
+    unsigned int index;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OO|O:setup_buffer_pool",
+            keyword_names,
+            &entries_object,
+            &buffer_size_object,
+            &group_id_object)) {
+        return NULL;
+    }
+    if (!self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (self->buffer_ring != NULL) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "a provided-buffer pool is already registered");
+        return NULL;
+    }
+    if (uringcore_liburing_parse_uint(
+            entries_object, "entries", 0, &entries) < 0 ||
+        uringcore_liburing_parse_uint(
+            buffer_size_object, "buffer_size", 0, &buffer_size) < 0) {
+        return NULL;
+    }
+    if ((entries & (entries - 1)) != 0 || entries > 32768) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "buffer-pool entries must be a power of two no greater than 32768");
+        return NULL;
+    }
+    if (group_id_object != NULL) {
+        group_id_index = PyNumber_Index(group_id_object);
+        if (group_id_index == NULL) {
+            return NULL;
+        }
+        parsed_group_id = PyLong_AsUnsignedLong(group_id_index);
+        Py_DECREF(group_id_index);
+        if ((parsed_group_id == ULONG_MAX && PyErr_Occurred()) ||
+            parsed_group_id > USHRT_MAX) {
+            PyErr_Clear();
+            PyErr_Format(
+                PyExc_ValueError,
+                "group_id must be between 0 and %u",
+                USHRT_MAX);
+            return NULL;
+        }
+    }
+    if ((size_t)buffer_size > SIZE_MAX / entries) {
+        PyErr_SetString(PyExc_OverflowError, "buffer-pool allocation is too large");
+        return NULL;
+    }
+    allocation_size = (size_t)entries * buffer_size;
+    storage = PyMem_RawMalloc(allocation_size);
+    if (storage == NULL) {
+        return PyErr_NoMemory();
+    }
+    buffer_ring = io_uring_setup_buf_ring(
+        &self->ring,
+        entries,
+        (int)parsed_group_id,
+        0,
+        &result);
+    if (buffer_ring == NULL) {
+        PyMem_RawFree(storage);
+        errno = -result;
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+
+    mask = io_uring_buf_ring_mask(entries);
+    for (index = 0; index < entries; index++) {
+        io_uring_buf_ring_add(
+            buffer_ring,
+            storage + (size_t)index * buffer_size,
+            buffer_size,
+            (unsigned short)index,
+            mask,
+            (int)index);
+    }
+    io_uring_buf_ring_advance(buffer_ring, (int)entries);
+    self->buffer_ring = buffer_ring;
+    self->buffer_storage = storage;
+    self->buffer_entries = entries;
+    self->buffer_size = buffer_size;
+    self->buffer_group_id = (unsigned int)parsed_group_id;
+    self->buffers_available = entries;
+    self->buffers_in_use = 0;
     Py_RETURN_NONE;
 }
 
@@ -1260,12 +1420,28 @@ uringcore_liburing_ring_get_cq_dropped(
     return PyLong_FromUnsignedLong(dropped);
 }
 
+static PyObject *
+uringcore_liburing_ring_get_buffer_pool_bytes(
+    UringCoreLiburingRing *self,
+    void *Py_UNUSED(context))
+{
+    size_t bytes = (size_t)self->buffer_entries * self->buffer_size;
+
+    return PyLong_FromSize_t(bytes);
+}
+
 static PyMethodDef uringcore_liburing_ring_methods[] = {
     {
         "prepare_nop",
         (PyCFunction)uringcore_liburing_ring_prepare_nop,
         METH_NOARGS,
         PyDoc_STR("Prepare one native no-op request without submitting it."),
+    },
+    {
+        "setup_buffer_pool",
+        _PyCFunction_CAST(uringcore_liburing_ring_setup_buffer_pool),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Allocate and register one bounded provided-buffer pool."),
     },
     {
         "prepare_timeout",
@@ -1347,6 +1523,41 @@ static PyMemberDef uringcore_liburing_ring_members[] = {
         READONLY,
         PyDoc_STR("Feature flags returned by io_uring_setup."),
     },
+    {
+        "buffer_pool_entries",
+        T_UINT,
+        offsetof(UringCoreLiburingRing, buffer_entries),
+        READONLY,
+        PyDoc_STR("Number of buffers allocated in the registered pool."),
+    },
+    {
+        "buffer_size",
+        T_UINT,
+        offsetof(UringCoreLiburingRing, buffer_size),
+        READONLY,
+        PyDoc_STR("Bytes allocated for each provided buffer."),
+    },
+    {
+        "buffer_group_id",
+        T_UINT,
+        offsetof(UringCoreLiburingRing, buffer_group_id),
+        READONLY,
+        PyDoc_STR("Kernel buffer-group identifier."),
+    },
+    {
+        "buffers_available",
+        T_UINT,
+        offsetof(UringCoreLiburingRing, buffers_available),
+        READONLY,
+        PyDoc_STR("Buffers currently available for kernel selection."),
+    },
+    {
+        "buffers_in_use",
+        T_UINT,
+        offsetof(UringCoreLiburingRing, buffers_in_use),
+        READONLY,
+        PyDoc_STR("Buffers retained by completion consumers."),
+    },
     {NULL},
 };
 
@@ -1384,6 +1595,13 @@ static PyGetSetDef uringcore_liburing_ring_getset[] = {
         (getter)uringcore_liburing_ring_get_cq_dropped,
         NULL,
         PyDoc_STR("Number of CQEs the kernel reports as dropped."),
+        NULL,
+    },
+    {
+        "buffer_pool_bytes",
+        (getter)uringcore_liburing_ring_get_buffer_pool_bytes,
+        NULL,
+        PyDoc_STR("Total bytes reserved by the provided-buffer pool."),
         NULL,
     },
     {NULL},
@@ -1458,7 +1676,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 4) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 5) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(
