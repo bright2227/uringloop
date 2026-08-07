@@ -160,3 +160,9 @@ The native ownership rules and cancellation race model are documented in the
 returns immutable per-CQE completion snapshots and retains requests until the
 completion model identifies a final CQE, rather than releasing on the first
 CQE unconditionally.
+
+## CQ and probing follow-up
+
+Explicit CQ sizing, overflow visibility, dropped-CQE detection, and injectable
+runtime opcode probing are documented in
+[Phase 1 completion queues and runtime probing](phase1-cq-and-probing.md).

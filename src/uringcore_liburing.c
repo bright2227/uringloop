@@ -68,7 +68,9 @@ struct UringCoreLiburingRing {
     unsigned int features;
     unsigned int pending;
     unsigned int prepared;
+    unsigned int cq_dropped;
     unsigned long long generation;
+    PyObject *supported_opcodes;
 };
 
 static PyTypeObject UringCoreLiburingRequestType;
@@ -130,6 +132,7 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
     UringCoreLiburingRequest *request;
 
     if (self->initialized) {
+        self->cq_dropped = *self->ring.cq.koverflow;
         self->generation++;
         io_uring_queue_exit(&self->ring);
         memset(&self->ring, 0, sizeof(self->ring));
@@ -144,6 +147,125 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
     }
     self->pending = 0;
     self->prepared = 0;
+}
+
+static int
+uringcore_liburing_parse_uint(
+    PyObject *object,
+    const char *name,
+    unsigned int default_value,
+    unsigned int *value)
+{
+    PyObject *index;
+    unsigned long parsed;
+
+    if (object == NULL || object == Py_None) {
+        *value = default_value;
+        return 0;
+    }
+    index = PyNumber_Index(object);
+    if (index == NULL) {
+        return -1;
+    }
+    parsed = PyLong_AsUnsignedLong(index);
+    Py_DECREF(index);
+    if ((parsed == (unsigned long)-1 && PyErr_Occurred()) ||
+        parsed == 0 || parsed > UINT_MAX) {
+        PyErr_Clear();
+        PyErr_Format(
+            PyExc_ValueError,
+            "%s must be between 1 and %u",
+            name,
+            UINT_MAX);
+        return -1;
+    }
+    *value = (unsigned int)parsed;
+    return 0;
+}
+
+static PyObject *
+uringcore_liburing_validate_supported_opcodes(PyObject *object)
+{
+    PyObject *opcodes;
+    PyObject *iterator;
+    PyObject *item;
+
+    opcodes = PyFrozenSet_New(object);
+    if (opcodes == NULL) {
+        return NULL;
+    }
+    iterator = PyObject_GetIter(opcodes);
+    if (iterator == NULL) {
+        Py_DECREF(opcodes);
+        return NULL;
+    }
+    while ((item = PyIter_Next(iterator)) != NULL) {
+        PyObject *index = PyNumber_Index(item);
+        long opcode;
+
+        Py_DECREF(item);
+        if (index == NULL) {
+            Py_DECREF(iterator);
+            Py_DECREF(opcodes);
+            return NULL;
+        }
+        opcode = PyLong_AsLong(index);
+        Py_DECREF(index);
+        if ((opcode == -1 && PyErr_Occurred()) ||
+            opcode < 0 || opcode >= IORING_OP_LAST) {
+            PyErr_Clear();
+            PyErr_Format(
+                PyExc_ValueError,
+                "supported opcode must be between 0 and %d",
+                IORING_OP_LAST - 1);
+            Py_DECREF(iterator);
+            Py_DECREF(opcodes);
+            return NULL;
+        }
+    }
+    Py_DECREF(iterator);
+    if (PyErr_Occurred()) {
+        Py_DECREF(opcodes);
+        return NULL;
+    }
+    return opcodes;
+}
+
+static PyObject *
+uringcore_liburing_probe_supported_opcodes(struct io_uring *ring)
+{
+    struct io_uring_probe *probe;
+    PyObject *set;
+    PyObject *opcodes;
+    int opcode;
+
+    probe = io_uring_get_probe_ring(ring);
+    if (probe == NULL) {
+        PyErr_SetString(PyExc_OSError, "io_uring opcode probing failed");
+        return NULL;
+    }
+    set = PySet_New(NULL);
+    if (set == NULL) {
+        io_uring_free_probe(probe);
+        return NULL;
+    }
+    for (opcode = 0; opcode < IORING_OP_LAST; opcode++) {
+        if (io_uring_opcode_supported(probe, opcode)) {
+            PyObject *value = PyLong_FromLong(opcode);
+
+            if (value == NULL || PySet_Add(set, value) < 0) {
+                Py_XDECREF(value);
+                Py_DECREF(set);
+                io_uring_free_probe(probe);
+                return NULL;
+            }
+            Py_DECREF(value);
+        }
+    }
+    io_uring_free_probe(probe);
+    opcodes = PyFrozenSet_New(set);
+    Py_DECREF(set);
+    return opcodes;
 }
 
 static void
@@ -416,48 +538,68 @@ uringcore_liburing_ring_init(
     PyObject *args,
     PyObject *kwargs)
 {
-    static char *keyword_names[] = {"entries", NULL};
+    static char *keyword_names[] = {
+        "entries",
+        "cq_entries",
+        "supported_opcodes",
+        NULL,
+    };
     PyObject *entries_object = NULL;
-    PyObject *entries_index = NULL;
-    unsigned long parsed_entries;
+    PyObject *cq_entries_object = NULL;
+    PyObject *supported_opcodes_object = NULL;
+    PyObject *supported_opcodes = NULL;
     unsigned int entries = 256;
+    unsigned int cq_entries;
+    unsigned int default_cq_entries;
     struct io_uring_params params;
     int result;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "|O:Ring", keyword_names, &entries_object)) {
+            args,
+            kwargs,
+            "|OOO:Ring",
+            keyword_names,
+            &entries_object,
+            &cq_entries_object,
+            &supported_opcodes_object)) {
         return -1;
     }
-    if (entries_object != NULL) {
-        entries_index = PyNumber_Index(entries_object);
-        if (entries_index == NULL) {
+    if (uringcore_liburing_parse_uint(
+            entries_object, "entries", 256, &entries) < 0) {
+        return -1;
+    }
+    default_cq_entries = entries <= UINT_MAX / 2 ? entries * 2 : UINT_MAX;
+    if (uringcore_liburing_parse_uint(
+            cq_entries_object,
+            "cq_entries",
+            default_cq_entries,
+            &cq_entries) < 0) {
+        return -1;
+    }
+    if (cq_entries < entries) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "cq_entries must be greater than or equal to entries");
+        return -1;
+    }
+    if (supported_opcodes_object != NULL &&
+        supported_opcodes_object != Py_None) {
+        supported_opcodes = uringcore_liburing_validate_supported_opcodes(
+            supported_opcodes_object);
+        if (supported_opcodes == NULL) {
             return -1;
         }
-        parsed_entries = PyLong_AsUnsignedLong(entries_index);
-        Py_DECREF(entries_index);
-        if (parsed_entries == (unsigned long)-1 && PyErr_Occurred()) {
-            PyErr_Clear();
-            PyErr_Format(
-                PyExc_ValueError,
-                "entries must be between 1 and %u",
-                UINT_MAX);
-            return -1;
-        }
-        if (parsed_entries == 0 || parsed_entries > UINT_MAX) {
-            PyErr_Format(
-                PyExc_ValueError,
-                "entries must be between 1 and %u",
-                UINT_MAX);
-            return -1;
-        }
-        entries = (unsigned int)parsed_entries;
     }
 
     uringcore_liburing_ring_close_resources(self);
+    Py_CLEAR(self->supported_opcodes);
     memset(&params, 0, sizeof(params));
+    params.flags = IORING_SETUP_CQSIZE;
+    params.cq_entries = cq_entries;
 
     result = io_uring_queue_init_params(entries, &self->ring, &params);
     if (result < 0) {
+        Py_XDECREF(supported_opcodes);
         errno = -result;
         PyErr_SetFromErrno(PyExc_OSError);
         return -1;
@@ -465,9 +607,19 @@ uringcore_liburing_ring_init(
 
     self->initialized = 1;
     self->generation++;
+    self->cq_dropped = 0;
     self->sq_entries = params.sq_entries;
     self->cq_entries = params.cq_entries;
     self->features = params.features;
+    if (supported_opcodes == NULL) {
+        supported_opcodes = uringcore_liburing_probe_supported_opcodes(
+            &self->ring);
+        if (supported_opcodes == NULL) {
+            uringcore_liburing_ring_close_resources(self);
+            return -1;
+        }
+    }
+    self->supported_opcodes = supported_opcodes;
     return 0;
 }
 
@@ -475,6 +627,7 @@ static void
 uringcore_liburing_ring_dealloc(UringCoreLiburingRing *self)
 {
     uringcore_liburing_ring_close_resources(self);
+    Py_CLEAR(self->supported_opcodes);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -533,6 +686,44 @@ uringcore_liburing_ring_get_sqe(UringCoreLiburingRing *self)
     return sqe;
 }
 
+static int
+uringcore_liburing_ring_supports_opcode(
+    UringCoreLiburingRing *self,
+    int opcode)
+{
+    PyObject *value;
+    int supported;
+
+    value = PyLong_FromLong(opcode);
+    if (value == NULL) {
+        return -1;
+    }
+    supported = PySet_Contains(self->supported_opcodes, value);
+    Py_DECREF(value);
+    return supported;
+}
+
+static int
+uringcore_liburing_ring_require_opcode(
+    UringCoreLiburingRing *self,
+    int opcode,
+    const char *operation)
+{
+    int supported = uringcore_liburing_ring_supports_opcode(self, opcode);
+
+    if (supported < 0) {
+        return -1;
+    }
+    if (!supported) {
+        PyErr_Format(
+            PyExc_NotImplementedError,
+            "%s is not supported by this io_uring",
+            operation);
+        return -1;
+    }
+    return 0;
+}
+
 static PyObject *
 uringcore_liburing_ring_prepare_nop(
     UringCoreLiburingRing *self,
@@ -541,6 +732,10 @@ uringcore_liburing_ring_prepare_nop(
     UringCoreLiburingRequest *request;
     struct io_uring_sqe *sqe;
 
+    if (uringcore_liburing_ring_require_opcode(
+            self, IORING_OP_NOP, "NOP") < 0) {
+        return NULL;
+    }
     request = uringcore_liburing_request_new(
         URINGCORE_REQUEST_NOP,
         URINGCORE_COMPLETION_ONE_SHOT);
@@ -573,6 +768,10 @@ uringcore_liburing_ring_prepare_timeout(
 
     if (!PyArg_ParseTupleAndKeywords(
             args, kwargs, "O:prepare_timeout", keyword_names, &delay_object)) {
+        return NULL;
+    }
+    if (uringcore_liburing_ring_require_opcode(
+            self, IORING_OP_TIMEOUT, "TIMEOUT") < 0) {
         return NULL;
     }
     delay_index = PyNumber_Index(delay_object);
@@ -631,6 +830,10 @@ uringcore_liburing_ring_prepare_cancel(
     }
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (uringcore_liburing_ring_require_opcode(
+            self, IORING_OP_ASYNC_CANCEL, "ASYNC_CANCEL") < 0) {
         return NULL;
     }
     if (target->ring != self) {
@@ -744,6 +947,22 @@ uringcore_liburing_completion_new(
     return completion;
 }
 
+static int
+uringcore_liburing_ring_check_cq_dropped(UringCoreLiburingRing *self)
+{
+    unsigned int dropped = *self->ring.cq.koverflow;
+
+    if (dropped == self->cq_dropped) {
+        return 0;
+    }
+    self->cq_dropped = dropped;
+    PyErr_Format(
+        PyExc_BufferError,
+        "io_uring dropped CQEs; cumulative dropped count is %u",
+        dropped);
+    return -1;
+}
+
 static PyObject *
 uringcore_liburing_ring_reap(
     UringCoreLiburingRing *self,
@@ -796,6 +1015,9 @@ uringcore_liburing_ring_reap(
     }
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (uringcore_liburing_ring_check_cq_dropped(self) < 0) {
         return NULL;
     }
     generation = self->generation;
@@ -928,6 +1150,10 @@ uringcore_liburing_ring_reap(
         }
         reaped++;
     }
+    if (uringcore_liburing_ring_check_cq_dropped(self) < 0) {
+        Py_DECREF(completed);
+        return NULL;
+    }
     return completed;
 }
 
@@ -953,11 +1179,85 @@ uringcore_liburing_ring_exit(
 }
 
 static PyObject *
+uringcore_liburing_ring_supports(
+    UringCoreLiburingRing *self,
+    PyObject *opcode_object)
+{
+    PyObject *index;
+    long opcode;
+    int supported;
+
+    index = PyNumber_Index(opcode_object);
+    if (index == NULL) {
+        return NULL;
+    }
+    opcode = PyLong_AsLong(index);
+    Py_DECREF(index);
+    if ((opcode == -1 && PyErr_Occurred()) ||
+        opcode < 0 || opcode >= IORING_OP_LAST) {
+        PyErr_Clear();
+        PyErr_Format(
+            PyExc_ValueError,
+            "opcode must be between 0 and %d",
+            IORING_OP_LAST - 1);
+        return NULL;
+    }
+    supported = uringcore_liburing_ring_supports_opcode(self, (int)opcode);
+    if (supported < 0) {
+        return NULL;
+    }
+    return PyBool_FromLong(supported);
+}
+
+static PyObject *
 uringcore_liburing_ring_get_closed(
     UringCoreLiburingRing *self,
     void *Py_UNUSED(context))
 {
     return PyBool_FromLong(!self->initialized);
+}
+
+static PyObject *
+uringcore_liburing_ring_get_supported_opcodes(
+    UringCoreLiburingRing *self,
+    void *Py_UNUSED(context))
+{
+    return Py_NewRef(self->supported_opcodes);
+}
+
+static PyObject *
+uringcore_liburing_ring_get_cq_ready(
+    UringCoreLiburingRing *self,
+    void *Py_UNUSED(context))
+{
+    if (!self->initialized) {
+        return PyLong_FromLong(0);
+    }
+    return PyLong_FromUnsignedLong(io_uring_cq_ready(&self->ring));
+}
+
+static PyObject *
+uringcore_liburing_ring_get_cq_overflowed(
+    UringCoreLiburingRing *self,
+    void *Py_UNUSED(context))
+{
+    if (!self->initialized) {
+        Py_RETURN_FALSE;
+    }
+    return PyBool_FromLong(io_uring_cq_has_overflow(&self->ring));
+}
+
+static PyObject *
+uringcore_liburing_ring_get_cq_dropped(
+    UringCoreLiburingRing *self,
+    void *Py_UNUSED(context))
+{
+    unsigned int dropped = self->cq_dropped;
+
+    if (self->initialized) {
+        dropped = *self->ring.cq.koverflow;
+    }
+    return PyLong_FromUnsignedLong(dropped);
 }
 
 static PyMethodDef uringcore_liburing_ring_methods[] = {
@@ -990,6 +1290,12 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         _PyCFunction_CAST(uringcore_liburing_ring_reap),
         METH_VARARGS | METH_KEYWORDS,
         PyDoc_STR("Return immutable snapshots of up to max_completions CQEs."),
+    },
+    {
+        "supports",
+        (PyCFunction)uringcore_liburing_ring_supports,
+        METH_O,
+        PyDoc_STR("Return whether runtime probing reported an opcode."),
     },
     {
         "close",
@@ -1050,6 +1356,34 @@ static PyGetSetDef uringcore_liburing_ring_getset[] = {
         (getter)uringcore_liburing_ring_get_closed,
         NULL,
         PyDoc_STR("Whether the liburing ring resources have been released."),
+        NULL,
+    },
+    {
+        "supported_opcodes",
+        (getter)uringcore_liburing_ring_get_supported_opcodes,
+        NULL,
+        PyDoc_STR("Immutable opcode set from probing or test injection."),
+        NULL,
+    },
+    {
+        "cq_ready",
+        (getter)uringcore_liburing_ring_get_cq_ready,
+        NULL,
+        PyDoc_STR("Number of CQEs currently ready to reap."),
+        NULL,
+    },
+    {
+        "cq_overflowed",
+        (getter)uringcore_liburing_ring_get_cq_overflowed,
+        NULL,
+        PyDoc_STR("Whether the kernel is using the CQ overflow path."),
+        NULL,
+    },
+    {
+        "cq_dropped",
+        (getter)uringcore_liburing_ring_get_cq_dropped,
+        NULL,
+        PyDoc_STR("Number of CQEs the kernel reports as dropped."),
         NULL,
     },
     {NULL},
@@ -1124,7 +1458,15 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 3) < 0) {
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 4) < 0 ||
+        PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
+        PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
+        PyModule_AddIntConstant(
+            module, "OP_ASYNC_CANCEL", IORING_OP_ASYNC_CANCEL) < 0 ||
+        PyModule_AddIntConstant(module, "OP_RECV", IORING_OP_RECV) < 0 ||
+        PyModule_AddIntConstant(module, "OP_SEND_ZC", IORING_OP_SEND_ZC) < 0 ||
+        PyModule_AddIntConstant(
+            module, "OP_PROVIDE_BUFFERS", IORING_OP_PROVIDE_BUFFERS) < 0) {
         Py_DECREF(module);
         return NULL;
     }

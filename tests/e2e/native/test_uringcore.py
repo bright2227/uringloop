@@ -7,7 +7,7 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 3
+    assert _uringcore.ABI_VERSION == 4
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
@@ -34,11 +34,16 @@ def test_native_ring_owns_and_releases_kernel_resources():
     ring = _uringcore.Ring(8)
 
     assert ring.sq_entries >= 8
-    assert ring.cq_entries >= ring.sq_entries
+    assert ring.cq_entries >= ring.sq_entries * 2
+    assert ring.cq_ready == 0
+    assert ring.cq_overflowed is False
+    assert ring.cq_dropped == 0
     assert ring.closed is False
 
     ring.close()
     assert ring.closed is True
+    assert ring.cq_ready == 0
+    assert ring.cq_overflowed is False
 
     ring.close()
     assert ring.closed is True
@@ -185,3 +190,58 @@ def test_native_ring_rejects_invalid_cancellation_targets():
     other_ring.close()
     assert prepared.state == "released"
     assert cancellation.state == "released"
+
+
+@pytest.mark.parametrize("cq_entries", [-1, 0, 4, 2**32])
+def test_native_ring_rejects_invalid_cq_size(cq_entries):
+    with pytest.raises(ValueError, match="cq_entries"):
+        _uringcore.Ring(entries=8, cq_entries=cq_entries)
+
+
+def test_native_ring_runtime_opcode_probe_can_be_injected():
+    supported = {_uringcore.OP_NOP, _uringcore.OP_TIMEOUT}
+    ring = _uringcore.Ring(8, supported_opcodes=supported)
+
+    assert ring.supported_opcodes == frozenset(supported)
+    assert ring.supports(_uringcore.OP_NOP) is True
+    assert ring.supports(_uringcore.OP_ASYNC_CANCEL) is False
+
+    ring.prepare_nop()
+    with pytest.raises(NotImplementedError, match="ASYNC_CANCEL"):
+        ring.prepare_cancel(ring.prepare_timeout(1_000_000))
+    ring.close()
+
+
+def test_native_ring_injected_probe_exercises_unsupported_fallback():
+    ring = _uringcore.Ring(8, supported_opcodes=())
+
+    with pytest.raises(NotImplementedError, match="NOP"):
+        ring.prepare_nop()
+    with pytest.raises(NotImplementedError, match="TIMEOUT"):
+        ring.prepare_timeout(1)
+
+
+@pytest.mark.parametrize("opcode", [-1, 2**32, "NOP"])
+def test_native_ring_rejects_invalid_probe_values(opcode):
+    error = TypeError if isinstance(opcode, str) else ValueError
+    with pytest.raises(error):
+        _uringcore.Ring(8, supported_opcodes={opcode})
+
+
+def test_native_ring_detects_and_drains_cq_pressure():
+    ring = _uringcore.Ring(entries=2, cq_entries=2)
+    requests = []
+    for _ in range(16):
+        requests.extend((ring.prepare_nop(), ring.prepare_nop()))
+        assert ring.submit() == 2
+
+    deadline = time.monotonic() + 1
+    while not ring.cq_overflowed and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    assert ring.cq_overflowed is True
+    completions = reap_completions(ring, len(requests))
+    assert {completion.request for completion in completions} == set(requests)
+    assert ring.pending == 0
+    assert ring.cq_dropped == 0
+    assert ring.cq_overflowed is False
