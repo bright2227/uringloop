@@ -13,6 +13,32 @@ LIBURING_EXTENSION_NAMES = {
     "uringloop._liburing",
     "uringloop._uringcore",
 }
+SANITIZER_ENVIRONMENT_VARIABLE = "URINGLOOP_SANITIZERS"
+
+
+def sanitizer_flags():
+    """Return compiler and linker flags for an opt-in sanitizer build."""
+    requested = os.environ.get(SANITIZER_ENVIRONMENT_VARIABLE, "").strip()
+    if not requested:
+        return []
+
+    sanitizers = [sanitizer.strip() for sanitizer in requested.split(",") if sanitizer.strip()]
+    supported = {"address", "undefined"}
+    unsupported = sorted(set(sanitizers) - supported)
+    if unsupported:
+        unsupported_list = ", ".join(unsupported)
+        raise RuntimeError(
+            f"unsupported {SANITIZER_ENVIRONMENT_VARIABLE} value(s): {unsupported_list}; "
+            f"supported values are: {', '.join(sorted(supported))}"
+        )
+    if not sanitizers:
+        raise RuntimeError(f"{SANITIZER_ENVIRONMENT_VARIABLE} must name at least one sanitizer")
+
+    return [
+        f"-fsanitize={','.join(dict.fromkeys(sanitizers))}",
+        "-fno-omit-frame-pointer",
+        "-fno-sanitize-recover=all",
+    ]
 
 
 class VendoredLiburingBuildExt(build_ext):
@@ -21,16 +47,19 @@ class VendoredLiburingBuildExt(build_ext):
     def build_extensions(self):
         extensions = [extension for extension in self.extensions if extension.name in LIBURING_EXTENSION_NAMES]
         if extensions:
-            archive = self._build_vendored_liburing()
+            instrumentation_flags = sanitizer_flags()
+            archive = self._build_vendored_liburing(instrumentation_flags)
             include_directory = archive.parent / "include"
             for extension in extensions:
                 extension.extra_objects = [*(extension.extra_objects or []), str(archive)]
                 extension.depends = [*(extension.depends or []), str(archive)]
                 extension.include_dirs = [str(include_directory)]
+                extension.extra_compile_args = [*(extension.extra_compile_args or []), *instrumentation_flags]
+                extension.extra_link_args = [*(extension.extra_link_args or []), *instrumentation_flags]
 
         super().build_extensions()
 
-    def _build_vendored_liburing(self):
+    def _build_vendored_liburing(self, instrumentation_flags):
         build_root = Path(self.build_temp).resolve() / "vendored-liburing"
         if build_root.exists():
             shutil.rmtree(build_root)
@@ -59,7 +88,9 @@ class VendoredLiburingBuildExt(build_ext):
         if compiler_command:
             environment.setdefault("CC", compiler_command[0])
         liburing_cflags = environment.get("LIBURING_CFLAGS", "")
-        environment["LIBURING_CFLAGS"] = f"{liburing_cflags} -fPIC".strip()
+        environment["LIBURING_CFLAGS"] = " ".join(
+            [liburing_cflags, "-fPIC", *instrumentation_flags]
+        ).strip()
 
         self.announce("configuring vendored liburing", level=2)
         subprocess.run(

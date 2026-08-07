@@ -142,3 +142,13 @@ directory. The sdist includes only the source, internal headers, and build
 metadata needed for that archive. Both extension modules link the resulting
 archive, so a clean source build neither consumes a checkout artifact nor
 links a system `liburing.so`.
+
+## Sanitizer follow-up
+
+The sanitizer prerequisite is implemented by the
+`feature/phase1-native-sanitizers` branch. Setting
+`URINGLOOP_SANITIZERS=address,undefined` applies the same ASAN/UBSAN
+instrumentation to the native core, the CFFI extension, and the private
+vendored-liburing archive. CI builds those components from source and runs the
+real-kernel native ring tests and the event-loop e2e suites with both runtimes
+configured to stop on the first error.

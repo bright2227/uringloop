@@ -37,6 +37,39 @@ jobs:
       - name: Run tests
         run: uv run pytest tests/ -v
 
+  native-sanitizers:
+    name: Native ASAN and UBSAN
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UV_PYTHON: "3.12"
+      URINGLOOP_SANITIZERS: address,undefined
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare environment
+        uses: ./.github/actions/prepare
+        with:
+          python-version: "3.12"
+
+      - name: Build instrumented extensions and vendored liburing
+        run: uv run python setup.py build_ext --inplace --force
+
+      - name: Run native ring tests
+        run: |
+          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
+            .venv/bin/python -m pytest tests/e2e/native -v
+
+      - name: Run event-loop e2e tests
+        run: |
+          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
+            .venv/bin/python -m pytest tests/e2e/loop tests/e2e/proactor -v
+
   check-sdist:
     name: Check source distribution
     if: github.event_name == 'pull_request'
