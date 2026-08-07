@@ -29,6 +29,7 @@ typedef enum {
     URINGCORE_REQUEST_SEND_ZC,
     URINGCORE_REQUEST_READ,
     URINGCORE_REQUEST_WRITE,
+    URINGCORE_REQUEST_POLL,
 } UringCoreRequestKind;
 
 typedef enum {
@@ -434,6 +435,9 @@ uringcore_liburing_request_get_kind(
             break;
         case URINGCORE_REQUEST_WRITE:
             kind = "write";
+            break;
+        case URINGCORE_REQUEST_POLL:
+            kind = "poll";
             break;
         default:
             PyErr_SetString(PyExc_SystemError, "request has an invalid kind");
@@ -1596,12 +1600,61 @@ uringcore_liburing_ring_prepare_write(
 }
 
 static PyObject *
+uringcore_liburing_ring_prepare_poll(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {"file", "mask", NULL};
+    PyObject *file_object;
+    unsigned int mask;
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OI:prepare_poll",
+            keyword_names,
+            &file_object,
+            &mask)) {
+        return NULL;
+    }
+    if (uringcore_liburing_ring_require_opcode(
+            self, IORING_OP_POLL_ADD, "POLL_ADD") < 0) {
+        return NULL;
+    }
+    request = uringcore_liburing_request_new(
+        URINGCORE_REQUEST_POLL,
+        URINGCORE_COMPLETION_ONE_SHOT);
+    if (request == NULL) {
+        return NULL;
+    }
+    request->fd = PyObject_AsFileDescriptor(file_object);
+    if (request->fd < 0) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    request->file_object = Py_NewRef(file_object);
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    io_uring_prep_poll_add(sqe, request->fd, mask);
+    io_uring_sqe_set_data(sqe, request);
+    uringcore_liburing_request_link(self, request);
+    return (PyObject *)request;
+}
+
+static PyObject *
 uringcore_liburing_ring_submit(
     UringCoreLiburingRing *self,
     PyObject *Py_UNUSED(ignored))
 {
     UringCoreLiburingRequest *request;
     unsigned int remaining;
+    unsigned int total = 0;
     unsigned long long generation;
     int result;
 
@@ -1611,42 +1664,51 @@ uringcore_liburing_ring_submit(
     }
     generation = self->generation;
 
-    do {
-        result = io_uring_submit(&self->ring);
-        if (result == -EINTR && PyErr_CheckSignals() < 0) {
+    while (self->prepared > 0) {
+        do {
+            result = io_uring_submit(&self->ring);
+            if (result == -EINTR && PyErr_CheckSignals() < 0) {
+                return NULL;
+            }
+            if (result == -EINTR &&
+                (!self->initialized || self->generation != generation)) {
+                PyErr_SetString(
+                    PyExc_RuntimeError,
+                    "ring changed while submit was interrupted");
+                return NULL;
+            }
+        } while (result == -EINTR);
+        if (result < 0) {
+            errno = -result;
+            PyErr_SetFromErrno(PyExc_OSError);
             return NULL;
         }
-        if (result == -EINTR &&
-            (!self->initialized || self->generation != generation)) {
+        if (result == 0) {
             PyErr_SetString(
                 PyExc_RuntimeError,
-                "ring changed while submit was interrupted");
+                "io_uring made no progress submitting prepared requests");
             return NULL;
         }
-    } while (result == -EINTR);
-    if (result < 0) {
-        errno = -result;
-        PyErr_SetFromErrno(PyExc_OSError);
-        return NULL;
-    }
 
-    remaining = (unsigned int)result;
-    request = self->request_head;
-    while (request != NULL && remaining > 0) {
-        if (request->state == URINGCORE_REQUEST_PREPARED) {
-            request->state = URINGCORE_REQUEST_SUBMITTED;
-            self->prepared--;
-            remaining--;
+        remaining = (unsigned int)result;
+        total += remaining;
+        request = self->request_head;
+        while (request != NULL && remaining > 0) {
+            if (request->state == URINGCORE_REQUEST_PREPARED) {
+                request->state = URINGCORE_REQUEST_SUBMITTED;
+                self->prepared--;
+                remaining--;
+            }
+            request = request->next;
         }
-        request = request->next;
+        if (remaining != 0) {
+            PyErr_SetString(
+                PyExc_SystemError,
+                "liburing submitted more requests than the ring had prepared");
+            return NULL;
+        }
     }
-    if (remaining != 0) {
-        PyErr_SetString(
-            PyExc_SystemError,
-            "liburing submitted more requests than the ring had prepared");
-        return NULL;
-    }
-    return PyLong_FromLong(result);
+    return PyLong_FromUnsignedLong(total);
 }
 
 static UringCoreLiburingCompletion *
@@ -1939,6 +2001,115 @@ uringcore_liburing_ring_reap(
 }
 
 static PyObject *
+uringcore_liburing_ring_wait(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {
+        "timeout_ns",
+        "max_completions",
+        NULL,
+    };
+    PyObject *timeout_object = Py_None;
+    PyObject *max_completions_object = NULL;
+    PyObject *timeout_index = NULL;
+    PyObject *reap_args;
+    PyObject *result_object;
+    unsigned long long timeout_ns = 0;
+    int has_timeout = 0;
+    int result;
+    unsigned long long generation;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "|OO:wait",
+            keyword_names,
+            &timeout_object,
+            &max_completions_object)) {
+        return NULL;
+    }
+    if (!self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (timeout_object != Py_None) {
+        timeout_index = PyNumber_Index(timeout_object);
+        if (timeout_index == NULL) {
+            return NULL;
+        }
+        timeout_ns = PyLong_AsUnsignedLongLong(timeout_index);
+        Py_DECREF(timeout_index);
+        if ((timeout_ns == ULLONG_MAX && PyErr_Occurred()) ||
+            timeout_ns > (unsigned long long)LLONG_MAX) {
+            PyErr_Clear();
+            PyErr_SetString(
+                PyExc_ValueError,
+                "timeout_ns must be between 0 and 9223372036854775807");
+            return NULL;
+        }
+        has_timeout = 1;
+    }
+
+    generation = self->generation;
+    if (io_uring_cq_ready(&self->ring) == 0 &&
+        (!has_timeout || timeout_ns != 0)) {
+        struct io_uring_cqe *cqe;
+
+        do {
+            if (has_timeout) {
+                struct __kernel_timespec timeout = {
+                    .tv_sec = (__kernel_time64_t)(
+                        timeout_ns / 1000000000ULL),
+                    .tv_nsec = (long)(timeout_ns % 1000000000ULL),
+                };
+                result = io_uring_wait_cqe_timeout(
+                    &self->ring, &cqe, &timeout);
+            }
+            else {
+                result = io_uring_wait_cqe(&self->ring, &cqe);
+            }
+            if (result == -EINTR && PyErr_CheckSignals() < 0) {
+                return NULL;
+            }
+            if (result == -EINTR &&
+                (!self->initialized || self->generation != generation)) {
+                PyErr_SetString(
+                    PyExc_RuntimeError,
+                    "ring changed while completion wait was interrupted");
+                return NULL;
+            }
+        } while (result == -EINTR);
+        if (result == -ETIME) {
+            return PyList_New(0);
+        }
+        if (result < 0) {
+            errno = -result;
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+
+    if (max_completions_object == NULL) {
+        max_completions_object = PyLong_FromLong(64);
+        if (max_completions_object == NULL) {
+            return NULL;
+        }
+    }
+    else {
+        Py_INCREF(max_completions_object);
+    }
+    reap_args = PyTuple_Pack(1, max_completions_object);
+    Py_DECREF(max_completions_object);
+    if (reap_args == NULL) {
+        return NULL;
+    }
+    result_object = uringcore_liburing_ring_reap(self, reap_args, NULL);
+    Py_DECREF(reap_args);
+    return result_object;
+}
+
+static PyObject *
 uringcore_liburing_ring_enter(
     UringCoreLiburingRing *self,
     PyObject *Py_UNUSED(ignored))
@@ -2113,6 +2284,12 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         PyDoc_STR("Prepare one file write from a readable buffer."),
     },
     {
+        "prepare_poll",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_poll),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare one poll request."),
+    },
+    {
         "submit",
         (PyCFunction)uringcore_liburing_ring_submit,
         METH_NOARGS,
@@ -2123,6 +2300,12 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         _PyCFunction_CAST(uringcore_liburing_ring_reap),
         METH_VARARGS | METH_KEYWORDS,
         PyDoc_STR("Return immutable snapshots of up to max_completions CQEs."),
+    },
+    {
+        "wait",
+        _PyCFunction_CAST(uringcore_liburing_ring_wait),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Wait for at least one CQE, then reap one batch."),
     },
     {
         "supports",
@@ -2343,7 +2526,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 6) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 7) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(
@@ -2352,6 +2535,8 @@ PyInit__uringcore(void)
         PyModule_AddIntConstant(module, "OP_SEND", IORING_OP_SEND) < 0 ||
         PyModule_AddIntConstant(module, "OP_READ", IORING_OP_READ) < 0 ||
         PyModule_AddIntConstant(module, "OP_WRITE", IORING_OP_WRITE) < 0 ||
+        PyModule_AddIntConstant(
+            module, "OP_POLL_ADD", IORING_OP_POLL_ADD) < 0 ||
         PyModule_AddIntConstant(module, "OP_SEND_ZC", IORING_OP_SEND_ZC) < 0 ||
         PyModule_AddIntConstant(
             module, "OP_PROVIDE_BUFFERS", IORING_OP_PROVIDE_BUFFERS) < 0) {

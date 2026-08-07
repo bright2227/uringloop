@@ -178,3 +178,10 @@ documented in the
 Kernel-facing buffer ownership, multishot receive, explicit buffer return, and
 zero-copy notification lifetime are documented in
 [Phase 1 native operations](phase1-native-operations.md).
+
+## Proactor-integration follow-up
+
+The public proactor now batches submission and completion through the native
+ring. Its compatibility boundary and the intentionally retained CFFI oracle
+are documented in
+[Phase 1 proactor integration](phase1-proactor-integration.md).

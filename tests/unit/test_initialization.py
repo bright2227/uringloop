@@ -2,6 +2,7 @@ import pytest
 
 import uringloop.loop
 from uringloop.loop import IouringProactorEventLoop
+import uringloop.native_proactor
 import uringloop.proactor
 from uringloop.proactor import IoUringProactor
 
@@ -10,7 +11,7 @@ def test_proactor_finalizer_handles_queue_initialization_failure(monkeypatch):
     def fail_queue_init(*args):
         raise OSError("io_uring unavailable")
 
-    monkeypatch.setattr(uringloop.proactor, "io_uring_queue_init", fail_queue_init)
+    monkeypatch.setattr(uringloop.native_proactor._uringcore, "Ring", fail_queue_init)
     proactor = IoUringProactor.__new__(IoUringProactor)
 
     with pytest.raises(OSError, match="io_uring unavailable"):

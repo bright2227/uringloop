@@ -1,4 +1,5 @@
 import errno
+import select
 import socket
 import tempfile
 import time
@@ -9,7 +10,7 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 6
+    assert _uringcore.ABI_VERSION == 7
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
@@ -110,6 +111,33 @@ def test_native_ring_submits_and_reaps_native_nop_requests():
     assert [request.cancelled for request in requests] == [False, False]
     assert [request.result for request in requests] == [0, 0]
     assert [request.flags for request in requests] == [0, 0]
+
+
+def test_native_ring_waits_for_and_reaps_poll_completion():
+    ring = _uringcore.Ring(8)
+    receiver, sender = socket.socketpair()
+    try:
+        request = ring.prepare_poll(receiver, select.POLLIN)
+        assert request.kind == "poll"
+        assert ring.submit() == 1
+
+        sender.sendall(b"ready")
+        [completion] = ring.wait(timeout_ns=1_000_000_000)
+
+        assert completion.request is request
+        assert completion.result & select.POLLIN
+        assert completion.final is True
+        assert request.state == "released"
+    finally:
+        receiver.close()
+        sender.close()
+        ring.close()
+
+
+def test_native_ring_wait_timeout_returns_without_completion():
+    ring = _uringcore.Ring(8)
+
+    assert ring.wait(timeout_ns=1_000_000) == []
 
 
 def test_native_ring_keeps_request_alive_until_completion():

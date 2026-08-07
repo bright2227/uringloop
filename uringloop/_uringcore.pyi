@@ -9,6 +9,7 @@ OP_RECV: Final[int]
 OP_SEND: Final[int]
 OP_READ: Final[int]
 OP_WRITE: Final[int]
+OP_POLL_ADD: Final[int]
 OP_SEND_ZC: Final[int]
 OP_PROVIDE_BUFFERS: Final[int]
 
@@ -28,7 +29,15 @@ class Request:
     def kind(
         self,
     ) -> Literal[
-        "nop", "timeout", "cancel", "recv", "send", "send_zc", "read", "write"
+        "nop",
+        "timeout",
+        "cancel",
+        "recv",
+        "send",
+        "send_zc",
+        "read",
+        "write",
+        "poll",
     ]: ...
     @property
     def done(self) -> bool: ...
@@ -117,6 +126,7 @@ class Ring:
     def prepare_send_zc(self, file: object, buffer: object, flags: int = 0) -> Request: ...
     def prepare_read(self, file: object, buffer: object, offset: int = -1) -> Request: ...
     def prepare_write(self, file: object, buffer: object, offset: int = -1) -> Request: ...
+    def prepare_poll(self, file: object, mask: int) -> Request: ...
     def setup_buffer_pool(
         self,
         entries: int,
@@ -125,6 +135,11 @@ class Ring:
     ) -> None: ...
     def submit(self) -> int: ...
     def reap(self, max_completions: int = 64) -> list[Completion]: ...
+    def wait(
+        self,
+        timeout_ns: int | None = None,
+        max_completions: int = 64,
+    ) -> list[Completion]: ...
     def supports(self, opcode: int) -> bool: ...
     def close(self) -> None: ...
     def __enter__(self) -> Self: ...
