@@ -7,6 +7,7 @@ include libs/configure
 include libs/liburing.spec
 include libs/src/Makefile
 include src/uringcore_liburing.c
+include THIRD_PARTY_LICENSES/CPython-PSF-2.0.txt
 include THIRD_PARTY_LICENSES/liburing-MIT.txt
 recursive-include libs/src *.c
 include libs/src/int_flags.h

@@ -8,6 +8,9 @@ source file. The tracked upstream revisions are:
 - Python 3.12: tag `v3.12.3`, commit `f6650f9ad73359051f3e558c2431a109bc016664`
 - Python 3.13: tag `v3.13.0`, commit `60403a5409ff2c3f3b07dd2ca91a7a3e096839c7`
 
+The adapted behavior is attributed to the Python Software Foundation under
+PSF License Version 2 in `THIRD_PARTY_LICENSES/CPython-PSF-2.0.txt`.
+
 The source areas are `Lib/test/test_asyncio/test_events.py`,
 `test_base_events.py`, `test_tasks.py`, `test_streams.py`, and
 `test_subprocess.py`. Each local test runs the behavior through

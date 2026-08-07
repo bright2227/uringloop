@@ -82,7 +82,12 @@ def main() -> int:
             [sys.executable, "-m", "pytest", "tests/compat", "-q", f"--junitxml={xml_path}"],
             cwd=ROOT,
             text=True,
+            capture_output=True,
         )
+        if process.stdout:
+            print(process.stdout, end="", file=sys.stderr)
+        if process.stderr:
+            print(process.stderr, end="", file=sys.stderr)
         summary = summarize(xml_path)
 
     document = {

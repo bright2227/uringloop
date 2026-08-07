@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any
 
 import pytest
@@ -86,3 +87,12 @@ async def test_subprocess_error():
     await exit_future
     assert transport.get_returncode() == 42
     transport.close()
+
+
+@pytest.mark.asyncio
+async def test_subprocess_without_os_pidfd_open(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+
+    process = await asyncio.create_subprocess_exec("/bin/sh", "-c", "exit 7")
+
+    assert await process.wait() == 7

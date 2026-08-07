@@ -5,6 +5,7 @@ import io
 import os
 import socket
 import stat
+import threading
 from typing import Any, cast
 
 from uringloop.lib import POLLERR, POLLHUP, POLLIN
@@ -228,8 +229,22 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         """Reap the child through a pidfd polled by io_uring.
 
         This replaces the child watcher API, which was removed in Python 3.14.
+        Some portable CPython builds omit ``os.pidfd_open`` even on a new
+        enough Linux kernel, so retain a waitpid thread as a compatibility
+        fallback for those interpreters.
         """
-        pidfd = os.pidfd_open(pid)
+        pidfd_open = getattr(os, "pidfd_open", None)
+        if pidfd_open is None:
+            thread = threading.Thread(
+                target=self._waitpid_in_thread,
+                args=(pid, transp),
+                name=f"uringloop-waitpid-{pid}",
+                daemon=True,
+            )
+            thread.start()
+            return
+
+        pidfd = pidfd_open(pid)
         fut: futures.Future[int] = self._proactor.poll_add(pidfd, POLLIN)
 
         def _child_exited(fut: futures.Future[int]):
@@ -251,6 +266,25 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             self.call_soon(transp._process_exited, returncode)  # type: ignore[reportPrivateUsage]
 
         fut.add_done_callback(_child_exited)
+
+    def _waitpid_in_thread(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):  # type: ignore[reportPrivateUsage]
+        while True:
+            try:
+                _, status = os.waitpid(pid, 0)
+                returncode = os.waitstatus_to_exitcode(status)
+                break
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                returncode = 255
+                logger.warning("child process pid %d exit status already read: will report returncode 255", pid)
+                break
+
+        try:
+            self.call_soon_threadsafe(transp._process_exited, returncode)  # type: ignore[reportPrivateUsage]
+        except RuntimeError:
+            # The loop may have been closed while its child was still alive.
+            pass
 
     def _make_write_pipe_transport(self, sock, protocol, waiter=None, extra=None):
         return _IoUringWritePipeTransport(self, sock, protocol, waiter, extra)

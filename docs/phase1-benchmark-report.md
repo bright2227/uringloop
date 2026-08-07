@@ -65,12 +65,13 @@ including every sample and the unabridged `strace -c` summaries, is retained in
 | | uvloop `to_thread` | 4,878 | 0.008959 | 165.9 | 796.0 | 23.4% | 107 `epoll_pwait`, 2 `io_uring_enter` |
 
 The native/CFFI syscall counts are identical for each workload: the Phase 1
-gain comes from less Python/CFFI boundary work, not a claimed syscall
-reduction. Relative to CFFI, median native throughput is about 39% higher for
-socket echo, 32% higher for streams, and 99% higher for file reads; median CPU
-time falls by roughly 28%, 25%, and 50%, respectively. The high coefficients
-of variation in several very short samples prohibit treating those percentages
-as stable performance guarantees.
+gain is consistent with reduced Python/CFFI boundary overhead, but these
+measurements do not isolate that from other implementation differences.
+Relative to CFFI, median native throughput is about 39% higher for socket echo,
+32% higher for streams, and 99% higher for file reads; median CPU time falls by
+roughly 28%, 25%, and 50%, respectively. The high coefficients of variation in
+several very short samples prohibit treating those percentages as stable
+performance guarantees.
 
 ## Correctness baseline
 
