@@ -172,3 +172,9 @@ runtime opcode probing are documented in
 The bounded allocation, registration, accounting, and return rules are
 documented in the
 [Phase 1 provided-buffer pool](phase1-provided-buffer-pool.md).
+
+## Native-operation follow-up
+
+Kernel-facing buffer ownership, multishot receive, explicit buffer return, and
+zero-copy notification lifetime are documented in
+[Phase 1 native operations](phase1-native-operations.md).

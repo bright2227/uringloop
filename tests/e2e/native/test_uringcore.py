@@ -1,4 +1,6 @@
 import errno
+import socket
+import tempfile
 import time
 
 import pytest
@@ -7,10 +9,11 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 5
+    assert _uringcore.ABI_VERSION == 6
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
+    assert _uringcore.ProvidedBuffer.__module__ == "uringloop._uringcore"
 
 
 def reap_completions(ring, count):
@@ -22,6 +25,27 @@ def reap_completions(ring, count):
             time.sleep(0.001)
     assert len(completed) == count
     return completed
+
+
+def reap_request_final(ring, request):
+    completions = []
+    deadline = time.monotonic() + 1
+    while not request.done and time.monotonic() < deadline:
+        completions.extend(ring.reap())
+        if not request.done:
+            time.sleep(0.001)
+    assert request.done
+    return completions
+
+
+def tcp_socket_pair():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    client = socket.create_connection(listener.getsockname())
+    server, _ = listener.accept()
+    listener.close()
+    return client, server
 
 
 @pytest.mark.parametrize("entries", [-(2**32), -1, 0, 2**32, 2**64])
@@ -288,3 +312,147 @@ def test_native_ring_rejects_invalid_buffer_group(group_id):
 
     with pytest.raises(ValueError, match="group_id"):
         ring.setup_buffer_pool(8, 1024, group_id)
+
+
+def test_native_ring_send_and_recv_own_python_buffers():
+    left, right = socket.socketpair()
+    ring = _uringcore.Ring(8)
+    received = bytearray(5)
+    recv_request = ring.prepare_recv(left, received)
+    send_request = ring.prepare_send(right, b"hello")
+
+    assert ring.submit() == 2
+    completions = reap_completions(ring, 2)
+    by_request = {completion.request: completion for completion in completions}
+
+    assert by_request[send_request].result == 5
+    assert by_request[recv_request].result == 5
+    assert received == b"hello"
+    ring.close()
+    left.close()
+    right.close()
+
+
+def test_native_ring_reads_and_writes_files_with_owned_buffers():
+    ring = _uringcore.Ring(8)
+    with tempfile.TemporaryFile() as file:
+        write_request = ring.prepare_write(file, b"uring", offset=0)
+        assert ring.submit() == 1
+        [write_completion] = reap_completions(ring, 1)
+        assert write_completion.request is write_request
+        assert write_completion.result == 5
+
+        target = bytearray(5)
+        read_request = ring.prepare_read(file, target, offset=0)
+        assert ring.submit() == 1
+        [read_completion] = reap_completions(ring, 1)
+        assert read_completion.request is read_request
+        assert read_completion.result == 5
+        assert target == b"uring"
+
+
+def test_native_multishot_recv_returns_explicitly_owned_buffers():
+    left, right = socket.socketpair(type=socket.SOCK_DGRAM)
+    ring = _uringcore.Ring(8)
+    ring.setup_buffer_pool(4, 64)
+    request = ring.prepare_recv_multishot(left)
+    assert ring.submit() == 1
+
+    right.send(b"one")
+    right.send(b"two")
+    completions = reap_completions(ring, 2)
+    buffers = [completion.buffer for completion in completions]
+
+    assert [buffer.to_bytes() for buffer in buffers] == [b"one", b"two"]
+    assert all(completion.final is False for completion in completions)
+    assert ring.buffers_available == 2
+    assert ring.buffers_in_use == 2
+    with pytest.raises(BufferError, match="provided buffers are in use"):
+        ring.close()
+
+    view = memoryview(buffers[0])
+    assert view.tobytes() == b"one"
+    with pytest.raises(BufferError, match="views are exported"):
+        buffers[0].release()
+    view.release()
+    buffers[0].release()
+    buffers[1].release()
+    assert ring.buffers_available == 4
+    assert ring.buffers_in_use == 0
+
+    cancellation = ring.prepare_cancel(request)
+    assert ring.submit() == 1
+    final = reap_completions(ring, 2)
+    assert {completion.request for completion in final} == {request, cancellation}
+    ring.close()
+    left.close()
+    right.close()
+
+
+def test_native_multishot_recv_applies_backpressure_and_rearms():
+    left, right = socket.socketpair(type=socket.SOCK_DGRAM)
+    ring = _uringcore.Ring(8)
+    ring.setup_buffer_pool(2, 64)
+    request = ring.prepare_recv_multishot(left)
+    assert ring.submit() == 1
+
+    for payload in (b"one", b"two", b"blocked"):
+        right.send(payload)
+    completions = reap_request_final(ring, request)
+    selected = [completion for completion in completions if completion.buffer]
+
+    assert [completion.buffer.to_bytes() for completion in selected] == [
+        b"one",
+        b"two",
+    ]
+    assert completions[-1].result == -errno.ENOBUFS
+    assert completions[-1].final is True
+    assert ring.buffers_available == 0
+    assert ring.buffers_in_use == 2
+
+    for completion in selected:
+        completion.buffer.release()
+    rearmed = ring.prepare_recv_multishot(left)
+    assert ring.submit() == 1
+    [completion] = reap_completions(ring, 1)
+    assert completion.request is rearmed
+    assert completion.buffer.to_bytes() == b"blocked"
+    completion.buffer.release()
+
+    cancellation = ring.prepare_cancel(rearmed)
+    assert ring.submit() == 1
+    final = reap_completions(ring, 2)
+    assert {item.request for item in final} == {rearmed, cancellation}
+    ring.close()
+    left.close()
+    right.close()
+
+
+def test_native_send_zc_retains_buffer_until_notification():
+    left, right = tcp_socket_pair()
+    ring = _uringcore.Ring(8)
+    if not ring.supports(_uringcore.OP_SEND_ZC):
+        pytest.skip("SEND_ZC is unavailable")
+    payload = bytearray(b"z" * 4096)
+    request = ring.prepare_send_zc(left, payload)
+    assert ring.submit() == 1
+    assert right.recv(len(payload)) == payload
+
+    first = reap_completions(ring, 1)[0]
+    completions = [first]
+    if not first.final:
+        assert request.state == "notification_pending"
+        with pytest.raises(BufferError):
+            payload.extend(b"still-owned")
+        completions.extend(reap_request_final(ring, request))
+
+    assert completions[0].state == "operation_complete"
+    assert completions[0].result == len(payload)
+    if len(completions) == 2:
+        assert completions[0].final is False
+        assert completions[1].state == "notification_pending"
+        assert completions[1].final is True
+    payload.extend(b"released")
+    ring.close()
+    left.close()
+    right.close()

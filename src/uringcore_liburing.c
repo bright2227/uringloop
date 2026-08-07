@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 typedef enum {
     URINGCORE_REQUEST_PREPARED = 0,
@@ -23,6 +24,11 @@ typedef enum {
     URINGCORE_REQUEST_NOP = 0,
     URINGCORE_REQUEST_TIMEOUT,
     URINGCORE_REQUEST_CANCEL,
+    URINGCORE_REQUEST_RECV,
+    URINGCORE_REQUEST_SEND,
+    URINGCORE_REQUEST_SEND_ZC,
+    URINGCORE_REQUEST_READ,
+    URINGCORE_REQUEST_WRITE,
 } UringCoreRequestKind;
 
 typedef enum {
@@ -34,6 +40,7 @@ typedef enum {
 typedef struct UringCoreLiburingRing UringCoreLiburingRing;
 typedef struct UringCoreLiburingRequest UringCoreLiburingRequest;
 typedef struct UringCoreLiburingCompletion UringCoreLiburingCompletion;
+typedef struct UringCoreProvidedBuffer UringCoreProvidedBuffer;
 
 struct UringCoreLiburingRequest {
     PyObject_HEAD
@@ -45,6 +52,10 @@ struct UringCoreLiburingRequest {
     UringCoreCompletionModel completion_model;
     struct __kernel_timespec timeout;
     PyObject *cancel_target;
+    PyObject *file_object;
+    Py_buffer buffer;
+    int has_buffer;
+    int fd;
     int result;
     unsigned int flags;
     int cancelled;
@@ -57,6 +68,16 @@ struct UringCoreLiburingCompletion {
     int result;
     unsigned int flags;
     int final;
+    PyObject *buffer;
+};
+
+struct UringCoreProvidedBuffer {
+    PyObject_HEAD
+    UringCoreLiburingRing *ring;
+    unsigned int buffer_id;
+    Py_ssize_t length;
+    unsigned int exports;
+    int released;
 };
 
 struct UringCoreLiburingRing {
@@ -84,6 +105,7 @@ struct UringCoreLiburingRing {
 
 static PyTypeObject UringCoreLiburingRequestType;
 static PyTypeObject UringCoreLiburingCompletionType;
+static PyTypeObject UringCoreProvidedBufferType;
 
 static void
 uringcore_liburing_ring_free_buffer_pool(UringCoreLiburingRing *self)
@@ -156,6 +178,19 @@ uringcore_liburing_request_unlink(UringCoreLiburingRequest *request)
 }
 
 static void
+uringcore_liburing_request_release_resources(
+    UringCoreLiburingRequest *request)
+{
+    if (request->has_buffer) {
+        PyBuffer_Release(&request->buffer);
+        request->has_buffer = 0;
+        memset(&request->buffer, 0, sizeof(request->buffer));
+    }
+    Py_CLEAR(request->file_object);
+    Py_CLEAR(request->cancel_target);
+}
+
+static void
 uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
 {
     UringCoreLiburingRequest *request;
@@ -173,6 +208,7 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
         request->result = -ECANCELED;
         request->flags = 0;
         request->cancelled = 1;
+        uringcore_liburing_request_release_resources(request);
         uringcore_liburing_request_unlink(request);
     }
     self->pending = 0;
@@ -301,7 +337,7 @@ uringcore_liburing_probe_supported_opcodes(struct io_uring *ring)
 static void
 uringcore_liburing_request_dealloc(UringCoreLiburingRequest *self)
 {
-    Py_XDECREF(self->cancel_target);
+    uringcore_liburing_request_release_resources(self);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -384,6 +420,21 @@ uringcore_liburing_request_get_kind(
         case URINGCORE_REQUEST_CANCEL:
             kind = "cancel";
             break;
+        case URINGCORE_REQUEST_RECV:
+            kind = "recv";
+            break;
+        case URINGCORE_REQUEST_SEND:
+            kind = "send";
+            break;
+        case URINGCORE_REQUEST_SEND_ZC:
+            kind = "send_zc";
+            break;
+        case URINGCORE_REQUEST_READ:
+            kind = "read";
+            break;
+        case URINGCORE_REQUEST_WRITE:
+            kind = "write";
+            break;
         default:
             PyErr_SetString(PyExc_SystemError, "request has an invalid kind");
             return NULL;
@@ -459,6 +510,7 @@ static PyTypeObject UringCoreLiburingRequestType = {
 static void
 uringcore_liburing_completion_dealloc(UringCoreLiburingCompletion *self)
 {
+    Py_XDECREF(self->buffer);
     Py_XDECREF(self->request);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -524,6 +576,13 @@ static PyMemberDef uringcore_liburing_completion_members[] = {
         READONLY,
         PyDoc_STR("Whether the request released kernel ownership."),
     },
+    {
+        "buffer",
+        T_OBJECT,
+        offsetof(UringCoreLiburingCompletion, buffer),
+        READONLY,
+        PyDoc_STR("Selected provided buffer, or None."),
+    },
     {NULL},
 };
 
@@ -551,6 +610,189 @@ static PyTypeObject UringCoreLiburingCompletionType = {
     .tp_doc = uringcore_liburing_completion_doc,
     .tp_members = uringcore_liburing_completion_members,
     .tp_getset = uringcore_liburing_completion_getset,
+};
+
+static int
+uringcore_provided_buffer_return(UringCoreProvidedBuffer *self, int report_error)
+{
+    UringCoreLiburingRing *ring = self->ring;
+    unsigned char *address;
+    int mask;
+
+    if (self->released) {
+        return 0;
+    }
+    if (self->exports != 0) {
+        if (report_error) {
+            PyErr_SetString(
+                PyExc_BufferError,
+                "cannot release a provided buffer while views are exported");
+        }
+        return -1;
+    }
+    if (ring == NULL || !ring->initialized || ring->buffer_ring == NULL) {
+        if (report_error) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "provided-buffer ring is no longer available");
+        }
+        return -1;
+    }
+    if (self->buffer_id >= ring->buffer_entries ||
+        ring->buffers_in_use == 0) {
+        if (report_error) {
+            PyErr_SetString(PyExc_SystemError, "invalid provided-buffer state");
+        }
+        return -1;
+    }
+
+    address = ring->buffer_storage +
+        (size_t)self->buffer_id * ring->buffer_size;
+    mask = io_uring_buf_ring_mask(ring->buffer_entries);
+    io_uring_buf_ring_add(
+        ring->buffer_ring,
+        address,
+        ring->buffer_size,
+        (unsigned short)self->buffer_id,
+        mask,
+        0);
+    io_uring_buf_ring_advance(ring->buffer_ring, 1);
+    ring->buffers_in_use--;
+    ring->buffers_available++;
+    self->released = 1;
+    return 0;
+}
+
+static void
+uringcore_provided_buffer_dealloc(UringCoreProvidedBuffer *self)
+{
+    uringcore_provided_buffer_return(self, 0);
+    Py_XDECREF(self->ring);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static int
+uringcore_provided_buffer_getbuffer(
+    PyObject *object,
+    Py_buffer *view,
+    int flags)
+{
+    UringCoreProvidedBuffer *self = (UringCoreProvidedBuffer *)object;
+    unsigned char *address;
+
+    if (self->released) {
+        PyErr_SetString(PyExc_BufferError, "provided buffer has been released");
+        return -1;
+    }
+    address = self->ring->buffer_storage +
+        (size_t)self->buffer_id * self->ring->buffer_size;
+    if (PyBuffer_FillInfo(
+            view, object, address, self->length, 0, flags) < 0) {
+        return -1;
+    }
+    self->exports++;
+    return 0;
+}
+
+static void
+uringcore_provided_buffer_releasebuffer(
+    PyObject *object,
+    Py_buffer *Py_UNUSED(view))
+{
+    UringCoreProvidedBuffer *self = (UringCoreProvidedBuffer *)object;
+
+    if (self->exports > 0) {
+        self->exports--;
+    }
+}
+
+static PyObject *
+uringcore_provided_buffer_release(
+    UringCoreProvidedBuffer *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    if (uringcore_provided_buffer_return(self, 1) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+uringcore_provided_buffer_to_bytes(
+    UringCoreProvidedBuffer *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    unsigned char *address;
+
+    if (self->released) {
+        PyErr_SetString(PyExc_BufferError, "provided buffer has been released");
+        return NULL;
+    }
+    address = self->ring->buffer_storage +
+        (size_t)self->buffer_id * self->ring->buffer_size;
+    return PyBytes_FromStringAndSize((const char *)address, self->length);
+}
+
+static PyMethodDef uringcore_provided_buffer_methods[] = {
+    {
+        "release",
+        (PyCFunction)uringcore_provided_buffer_release,
+        METH_NOARGS,
+        PyDoc_STR("Return this buffer slot to the kernel buffer ring."),
+    },
+    {
+        "to_bytes",
+        (PyCFunction)uringcore_provided_buffer_to_bytes,
+        METH_NOARGS,
+        PyDoc_STR("Copy the received bytes into a new bytes object."),
+    },
+    {NULL, NULL, 0, NULL},
+};
+
+static PyMemberDef uringcore_provided_buffer_members[] = {
+    {
+        "buffer_id",
+        T_UINT,
+        offsetof(UringCoreProvidedBuffer, buffer_id),
+        READONLY,
+        PyDoc_STR("Kernel-selected buffer identifier."),
+    },
+    {
+        "length",
+        T_PYSSIZET,
+        offsetof(UringCoreProvidedBuffer, length),
+        READONLY,
+        PyDoc_STR("Number of received bytes."),
+    },
+    {
+        "released",
+        T_BOOL,
+        offsetof(UringCoreProvidedBuffer, released),
+        READONLY,
+        PyDoc_STR("Whether the slot has returned to the buffer ring."),
+    },
+    {NULL},
+};
+
+static PyBufferProcs uringcore_provided_buffer_as_buffer = {
+    .bf_getbuffer = uringcore_provided_buffer_getbuffer,
+    .bf_releasebuffer = uringcore_provided_buffer_releasebuffer,
+};
+
+PyDoc_STRVAR(
+    uringcore_provided_buffer_doc,
+    "A kernel-selected receive buffer with explicit return semantics.");
+
+static PyTypeObject UringCoreProvidedBufferType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "uringloop._uringcore.ProvidedBuffer",
+    .tp_basicsize = sizeof(UringCoreProvidedBuffer),
+    .tp_dealloc = (destructor)uringcore_provided_buffer_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = uringcore_provided_buffer_doc,
+    .tp_methods = uringcore_provided_buffer_methods,
+    .tp_members = uringcore_provided_buffer_members,
+    .tp_as_buffer = &uringcore_provided_buffer_as_buffer,
 };
 
 static PyObject *
@@ -821,6 +1063,10 @@ uringcore_liburing_request_new(
     request->completion_model = completion_model;
     memset(&request->timeout, 0, sizeof(request->timeout));
     request->cancel_target = NULL;
+    request->file_object = NULL;
+    memset(&request->buffer, 0, sizeof(request->buffer));
+    request->has_buffer = 0;
+    request->fd = -1;
     request->result = 0;
     request->flags = 0;
     request->cancelled = 0;
@@ -1028,6 +1274,327 @@ uringcore_liburing_ring_prepare_cancel(
     return (PyObject *)request;
 }
 
+static UringCoreLiburingRequest *
+uringcore_liburing_prepare_buffer_request(
+    UringCoreLiburingRing *self,
+    PyObject *file_object,
+    PyObject *buffer_object,
+    int buffer_flags,
+    UringCoreRequestKind kind,
+    UringCoreCompletionModel completion_model,
+    int opcode,
+    const char *operation)
+{
+    UringCoreLiburingRequest *request;
+
+    if (uringcore_liburing_ring_require_opcode(
+            self, opcode, operation) < 0) {
+        return NULL;
+    }
+    request = uringcore_liburing_request_new(kind, completion_model);
+    if (request == NULL) {
+        return NULL;
+    }
+    request->fd = PyObject_AsFileDescriptor(file_object);
+    if (request->fd < 0) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    request->file_object = Py_NewRef(file_object);
+    if (PyObject_GetBuffer(
+            buffer_object, &request->buffer, buffer_flags) < 0) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    request->has_buffer = 1;
+    if (request->buffer.len < 0 ||
+        (size_t)request->buffer.len > UINT_MAX) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "buffer length must fit in an unsigned 32-bit io_uring length");
+        Py_DECREF(request);
+        return NULL;
+    }
+    return request;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_recv(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {"file", "buffer", "flags", NULL};
+    PyObject *file_object;
+    PyObject *buffer_object;
+    int flags = 0;
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OO|i:prepare_recv",
+            keyword_names,
+            &file_object,
+            &buffer_object,
+            &flags)) {
+        return NULL;
+    }
+    request = uringcore_liburing_prepare_buffer_request(
+        self,
+        file_object,
+        buffer_object,
+        PyBUF_WRITABLE,
+        URINGCORE_REQUEST_RECV,
+        URINGCORE_COMPLETION_ONE_SHOT,
+        IORING_OP_RECV,
+        "RECV");
+    if (request == NULL) {
+        return NULL;
+    }
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    io_uring_prep_recv(
+        sqe,
+        request->fd,
+        request->buffer.buf,
+        (size_t)request->buffer.len,
+        flags);
+    io_uring_sqe_set_data(sqe, request);
+    uringcore_liburing_request_link(self, request);
+    return (PyObject *)request;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_recv_multishot(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {"file", "flags", NULL};
+    PyObject *file_object;
+    int flags = 0;
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "O|i:prepare_recv_multishot",
+            keyword_names,
+            &file_object,
+            &flags)) {
+        return NULL;
+    }
+    if (self->buffer_ring == NULL) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "prepare_recv_multishot requires a provided-buffer pool");
+        return NULL;
+    }
+    if (uringcore_liburing_ring_require_opcode(
+            self, IORING_OP_RECV, "RECV") < 0) {
+        return NULL;
+    }
+    request = uringcore_liburing_request_new(
+        URINGCORE_REQUEST_RECV,
+        URINGCORE_COMPLETION_MULTISHOT);
+    if (request == NULL) {
+        return NULL;
+    }
+    request->fd = PyObject_AsFileDescriptor(file_object);
+    if (request->fd < 0) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    request->file_object = Py_NewRef(file_object);
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    io_uring_prep_recv_multishot(sqe, request->fd, NULL, 0, flags);
+    sqe->buf_group = (unsigned short)self->buffer_group_id;
+    io_uring_sqe_set_flags(sqe, IOSQE_BUFFER_SELECT);
+    io_uring_sqe_set_data(sqe, request);
+    uringcore_liburing_request_link(self, request);
+    return (PyObject *)request;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_send_common(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs,
+    int zero_copy)
+{
+    static char *keyword_names[] = {"file", "buffer", "flags", NULL};
+    PyObject *file_object;
+    PyObject *buffer_object;
+    int flags = 0;
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OO|i:prepare_send",
+            keyword_names,
+            &file_object,
+            &buffer_object,
+            &flags)) {
+        return NULL;
+    }
+    request = uringcore_liburing_prepare_buffer_request(
+        self,
+        file_object,
+        buffer_object,
+        PyBUF_CONTIG_RO,
+        zero_copy ? URINGCORE_REQUEST_SEND_ZC : URINGCORE_REQUEST_SEND,
+        zero_copy ? URINGCORE_COMPLETION_NOTIFICATION :
+                    URINGCORE_COMPLETION_ONE_SHOT,
+        zero_copy ? IORING_OP_SEND_ZC : IORING_OP_SEND,
+        zero_copy ? "SEND_ZC" : "SEND");
+    if (request == NULL) {
+        return NULL;
+    }
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    if (zero_copy) {
+        io_uring_prep_send_zc(
+            sqe,
+            request->fd,
+            request->buffer.buf,
+            (size_t)request->buffer.len,
+            flags,
+            0);
+    }
+    else {
+        io_uring_prep_send(
+            sqe,
+            request->fd,
+            request->buffer.buf,
+            (size_t)request->buffer.len,
+            flags);
+    }
+    io_uring_sqe_set_data(sqe, request);
+    uringcore_liburing_request_link(self, request);
+    return (PyObject *)request;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_send(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    return uringcore_liburing_ring_prepare_send_common(
+        self, args, kwargs, 0);
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_send_zc(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    return uringcore_liburing_ring_prepare_send_common(
+        self, args, kwargs, 1);
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_file_io(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs,
+    int write_operation)
+{
+    static char *keyword_names[] = {"file", "buffer", "offset", NULL};
+    PyObject *file_object;
+    PyObject *buffer_object;
+    long long offset = -1;
+    UringCoreLiburingRequest *request;
+    struct io_uring_sqe *sqe;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "OO|L:prepare_file_io",
+            keyword_names,
+            &file_object,
+            &buffer_object,
+            &offset)) {
+        return NULL;
+    }
+    if (offset < -1) {
+        PyErr_SetString(PyExc_ValueError, "offset must be -1 or non-negative");
+        return NULL;
+    }
+    request = uringcore_liburing_prepare_buffer_request(
+        self,
+        file_object,
+        buffer_object,
+        write_operation ? PyBUF_CONTIG_RO : PyBUF_WRITABLE,
+        write_operation ? URINGCORE_REQUEST_WRITE : URINGCORE_REQUEST_READ,
+        URINGCORE_COMPLETION_ONE_SHOT,
+        write_operation ? IORING_OP_WRITE : IORING_OP_READ,
+        write_operation ? "WRITE" : "READ");
+    if (request == NULL) {
+        return NULL;
+    }
+    sqe = uringcore_liburing_ring_get_sqe(self);
+    if (sqe == NULL) {
+        Py_DECREF(request);
+        return NULL;
+    }
+    if (write_operation) {
+        io_uring_prep_write(
+            sqe,
+            request->fd,
+            request->buffer.buf,
+            (unsigned int)request->buffer.len,
+            (__u64)offset);
+    }
+    else {
+        io_uring_prep_read(
+            sqe,
+            request->fd,
+            request->buffer.buf,
+            (unsigned int)request->buffer.len,
+            (__u64)offset);
+    }
+    io_uring_sqe_set_data(sqe, request);
+    uringcore_liburing_request_link(self, request);
+    return (PyObject *)request;
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_read(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    return uringcore_liburing_ring_prepare_file_io(
+        self, args, kwargs, 0);
+}
+
+static PyObject *
+uringcore_liburing_ring_prepare_write(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    return uringcore_liburing_ring_prepare_file_io(
+        self, args, kwargs, 1);
+}
+
 static PyObject *
 uringcore_liburing_ring_submit(
     UringCoreLiburingRing *self,
@@ -1104,7 +1671,54 @@ uringcore_liburing_completion_new(
     completion->result = result;
     completion->flags = flags;
     completion->final = final;
+    completion->buffer = NULL;
     return completion;
+}
+
+static int
+uringcore_liburing_completion_claim_buffer(
+    UringCoreLiburingCompletion *completion)
+{
+    UringCoreLiburingRequest *request = completion->request;
+    UringCoreLiburingRing *ring = request->ring;
+    UringCoreProvidedBuffer *buffer;
+    unsigned int buffer_id;
+
+    if (!(completion->flags & IORING_CQE_F_BUFFER)) {
+        return 0;
+    }
+    if (request->kind != URINGCORE_REQUEST_RECV ||
+        ring->buffer_ring == NULL || completion->result < 0) {
+        PyErr_SetString(
+            PyExc_SystemError,
+            "unexpected provided buffer on completion");
+        return -1;
+    }
+    buffer_id = completion->flags >> IORING_CQE_BUFFER_SHIFT;
+    if (buffer_id >= ring->buffer_entries ||
+        (unsigned int)completion->result > ring->buffer_size ||
+        ring->buffers_available == 0) {
+        PyErr_SetString(
+            PyExc_SystemError,
+            "kernel returned an invalid provided-buffer selection");
+        return -1;
+    }
+
+    buffer = (UringCoreProvidedBuffer *)
+        UringCoreProvidedBufferType.tp_alloc(
+            &UringCoreProvidedBufferType, 0);
+    if (buffer == NULL) {
+        return -1;
+    }
+    buffer->ring = (UringCoreLiburingRing *)Py_NewRef((PyObject *)ring);
+    buffer->buffer_id = buffer_id;
+    buffer->length = completion->result;
+    buffer->exports = 0;
+    buffer->released = 0;
+    ring->buffers_available--;
+    ring->buffers_in_use++;
+    completion->buffer = (PyObject *)buffer;
+    return 0;
 }
 
 static int
@@ -1279,6 +1893,11 @@ uringcore_liburing_ring_reap(
             Py_DECREF(completed);
             return NULL;
         }
+        if (uringcore_liburing_completion_claim_buffer(completion) < 0) {
+            Py_DECREF(completion);
+            Py_DECREF(completed);
+            return NULL;
+        }
 
         request->state = completion_state;
         if (!(cqe->flags & IORING_CQE_F_NOTIF)) {
@@ -1299,6 +1918,7 @@ uringcore_liburing_ring_reap(
         if (PyList_Append(completed, (PyObject *)completion) < 0) {
             Py_DECREF(completion);
             if (final) {
+                uringcore_liburing_request_release_resources(request);
                 uringcore_liburing_request_unlink(request);
             }
             Py_DECREF(completed);
@@ -1306,6 +1926,7 @@ uringcore_liburing_ring_reap(
         }
         Py_DECREF(completion);
         if (final) {
+            uringcore_liburing_request_release_resources(request);
             uringcore_liburing_request_unlink(request);
         }
         reaped++;
@@ -1454,6 +2075,42 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         _PyCFunction_CAST(uringcore_liburing_ring_prepare_cancel),
         METH_VARARGS | METH_KEYWORDS,
         PyDoc_STR("Prepare asynchronous cancellation of a submitted request."),
+    },
+    {
+        "prepare_recv",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_recv),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare one receive into a caller-owned writable buffer."),
+    },
+    {
+        "prepare_recv_multishot",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_recv_multishot),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare multishot receive using the provided-buffer pool."),
+    },
+    {
+        "prepare_send",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_send),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare one copying socket send."),
+    },
+    {
+        "prepare_send_zc",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_send_zc),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare zero-copy send with notification lifetime."),
+    },
+    {
+        "prepare_read",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_read),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare one file read into a writable buffer."),
+    },
+    {
+        "prepare_write",
+        _PyCFunction_CAST(uringcore_liburing_ring_prepare_write),
+        METH_VARARGS | METH_KEYWORDS,
+        PyDoc_STR("Prepare one file write from a readable buffer."),
     },
     {
         "submit",
@@ -1646,6 +2303,9 @@ PyInit__uringcore(void)
     if (PyType_Ready(&UringCoreLiburingCompletionType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&UringCoreProvidedBufferType) < 0) {
+        return NULL;
+    }
     if (PyType_Ready(&UringCoreLiburingRingType) < 0) {
         return NULL;
     }
@@ -1676,12 +2336,22 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 5) < 0 ||
+    if (PyModule_AddObjectRef(
+            module,
+            "ProvidedBuffer",
+            (PyObject *)&UringCoreProvidedBufferType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 6) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(
             module, "OP_ASYNC_CANCEL", IORING_OP_ASYNC_CANCEL) < 0 ||
         PyModule_AddIntConstant(module, "OP_RECV", IORING_OP_RECV) < 0 ||
+        PyModule_AddIntConstant(module, "OP_SEND", IORING_OP_SEND) < 0 ||
+        PyModule_AddIntConstant(module, "OP_READ", IORING_OP_READ) < 0 ||
+        PyModule_AddIntConstant(module, "OP_WRITE", IORING_OP_WRITE) < 0 ||
         PyModule_AddIntConstant(module, "OP_SEND_ZC", IORING_OP_SEND_ZC) < 0 ||
         PyModule_AddIntConstant(
             module, "OP_PROVIDE_BUFFERS", IORING_OP_PROVIDE_BUFFERS) < 0) {
