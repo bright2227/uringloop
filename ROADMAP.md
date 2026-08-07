@@ -1,9 +1,8 @@
 # Roadmap: a native-core uringloop competitive with uvloop
 
-Status: draft for discussion — phases beyond the current baseline are not
-implemented yet.
+Status: Phase 1 complete; Phase 2 is next. Later phases remain planned work.
 
-Last updated: 2026-07-28
+Last updated: 2026-08-08
 
 ## Goal
 
@@ -130,9 +129,9 @@ API.
 
 **Status (2026-08-08)**: implementation and the Phase 1 correctness gates are
 complete. The [benchmark report](docs/phase1-benchmark-report.md) records the
-measured native/CFFI/stock-asyncio comparison and approves proceeding to Phase
-2; release performance claims still require the controlled full-profile run
-described in that report.
+measured native/CFFI/stock-asyncio/uvloop comparison and approves proceeding to
+Phase 2; release performance claims still require the controlled full-profile
+run described in that report.
 
 - Add a native extension, initially named `_uringcore`, that owns SQ/CQ
   management. It must not require a system-installed liburing at runtime.
