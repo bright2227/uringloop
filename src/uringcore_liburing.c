@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 
 typedef enum {
@@ -102,6 +103,7 @@ struct UringCoreLiburingRing {
     unsigned int buffer_group_id;
     unsigned int buffers_available;
     unsigned int buffers_in_use;
+    int waiting;
 };
 
 static PyTypeObject UringCoreLiburingRequestType;
@@ -112,11 +114,21 @@ static void
 uringcore_liburing_ring_free_buffer_pool(UringCoreLiburingRing *self)
 {
     if (self->buffer_ring != NULL && self->initialized) {
-        io_uring_free_buf_ring(
+        int result = io_uring_free_buf_ring(
             &self->ring,
             self->buffer_ring,
             self->buffer_entries,
             (int)self->buffer_group_id);
+        if (result != 0) {
+            /* Keep both mappings alive until queue teardown cancels every
+             * request that may still select from this buffer group. */
+            return;
+        }
+    }
+    else if (self->buffer_ring != NULL) {
+        munmap(
+            self->buffer_ring,
+            (size_t)self->buffer_entries * sizeof(struct io_uring_buf));
     }
     PyMem_RawFree(self->buffer_storage);
     self->buffer_ring = NULL;
@@ -203,6 +215,9 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
         io_uring_queue_exit(&self->ring);
         memset(&self->ring, 0, sizeof(self->ring));
         self->initialized = 0;
+        if (self->buffer_ring != NULL) {
+            uringcore_liburing_ring_free_buffer_pool(self);
+        }
     }
     while ((request = self->request_head) != NULL) {
         request->state = URINGCORE_REQUEST_RELEASED;
@@ -338,8 +353,23 @@ uringcore_liburing_probe_supported_opcodes(struct io_uring *ring)
 static void
 uringcore_liburing_request_dealloc(UringCoreLiburingRequest *self)
 {
+    PyObject_GC_UnTrack(self);
     uringcore_liburing_request_release_resources(self);
     Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static int
+uringcore_liburing_request_traverse(
+    UringCoreLiburingRequest *self,
+    visitproc visit,
+    void *arg)
+{
+    Py_VISIT(self->cancel_target);
+    Py_VISIT(self->file_object);
+    if (self->has_buffer) {
+        Py_VISIT(self->buffer.obj);
+    }
+    return 0;
 }
 
 static PyObject *
@@ -505,18 +535,31 @@ static PyTypeObject UringCoreLiburingRequestType = {
     .tp_name = "uringloop._uringcore.Request",
     .tp_basicsize = sizeof(UringCoreLiburingRequest),
     .tp_dealloc = (destructor)uringcore_liburing_request_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
     .tp_doc = uringcore_liburing_request_doc,
     .tp_members = uringcore_liburing_request_members,
     .tp_getset = uringcore_liburing_request_getset,
+    .tp_traverse = (traverseproc)uringcore_liburing_request_traverse,
 };
 
 static void
 uringcore_liburing_completion_dealloc(UringCoreLiburingCompletion *self)
 {
+    PyObject_GC_UnTrack(self);
     Py_XDECREF(self->buffer);
     Py_XDECREF(self->request);
     Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static int
+uringcore_liburing_completion_traverse(
+    UringCoreLiburingCompletion *self,
+    visitproc visit,
+    void *arg)
+{
+    Py_VISIT(self->request);
+    Py_VISIT(self->buffer);
+    return 0;
 }
 
 static PyObject *
@@ -610,10 +653,11 @@ static PyTypeObject UringCoreLiburingCompletionType = {
     .tp_name = "uringloop._uringcore.Completion",
     .tp_basicsize = sizeof(UringCoreLiburingCompletion),
     .tp_dealloc = (destructor)uringcore_liburing_completion_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
     .tp_doc = uringcore_liburing_completion_doc,
     .tp_members = uringcore_liburing_completion_members,
     .tp_getset = uringcore_liburing_completion_getset,
+    .tp_traverse = (traverseproc)uringcore_liburing_completion_traverse,
 };
 
 static int
@@ -670,9 +714,20 @@ uringcore_provided_buffer_return(UringCoreProvidedBuffer *self, int report_error
 static void
 uringcore_provided_buffer_dealloc(UringCoreProvidedBuffer *self)
 {
+    PyObject_GC_UnTrack(self);
     uringcore_provided_buffer_return(self, 0);
     Py_XDECREF(self->ring);
     Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static int
+uringcore_provided_buffer_traverse(
+    UringCoreProvidedBuffer *self,
+    visitproc visit,
+    void *arg)
+{
+    Py_VISIT(self->ring);
+    return 0;
 }
 
 static int
@@ -792,11 +847,12 @@ static PyTypeObject UringCoreProvidedBufferType = {
     .tp_name = "uringloop._uringcore.ProvidedBuffer",
     .tp_basicsize = sizeof(UringCoreProvidedBuffer),
     .tp_dealloc = (destructor)uringcore_provided_buffer_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
     .tp_doc = uringcore_provided_buffer_doc,
     .tp_methods = uringcore_provided_buffer_methods,
     .tp_members = uringcore_provided_buffer_members,
     .tp_as_buffer = &uringcore_provided_buffer_as_buffer,
+    .tp_traverse = (traverseproc)uringcore_provided_buffer_traverse,
 };
 
 static PyObject *
@@ -818,26 +874,37 @@ uringcore_liburing_ring_init(
         "entries",
         "cq_entries",
         "supported_opcodes",
+        "flags",
         NULL,
     };
     PyObject *entries_object = NULL;
     PyObject *cq_entries_object = NULL;
     PyObject *supported_opcodes_object = NULL;
+    PyObject *flags_object = NULL;
+    PyObject *flags_index = NULL;
     PyObject *supported_opcodes = NULL;
     unsigned int entries = 256;
     unsigned int cq_entries;
     unsigned int default_cq_entries;
+    unsigned long parsed_flags = 0;
     struct io_uring_params params;
     int result;
 
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
-            "|OOO:Ring",
+            "|OOOO:Ring",
             keyword_names,
             &entries_object,
             &cq_entries_object,
-            &supported_opcodes_object)) {
+            &supported_opcodes_object,
+            &flags_object)) {
+        return -1;
+    }
+    if (self->waiting) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "cannot reinitialize a ring while another thread is waiting");
         return -1;
     }
     if (uringcore_liburing_parse_uint(
@@ -866,6 +933,25 @@ uringcore_liburing_ring_init(
             return -1;
         }
     }
+    if (flags_object != NULL && flags_object != Py_None) {
+        flags_index = PyNumber_Index(flags_object);
+        if (flags_index == NULL) {
+            Py_XDECREF(supported_opcodes);
+            return -1;
+        }
+        parsed_flags = PyLong_AsUnsignedLong(flags_index);
+        Py_DECREF(flags_index);
+        if ((parsed_flags == ULONG_MAX && PyErr_Occurred()) ||
+            parsed_flags > UINT_MAX) {
+            Py_XDECREF(supported_opcodes);
+            PyErr_Clear();
+            PyErr_Format(
+                PyExc_ValueError,
+                "flags must be between 0 and %u",
+                UINT_MAX);
+            return -1;
+        }
+    }
     if (self->buffers_in_use != 0) {
         Py_XDECREF(supported_opcodes);
         PyErr_SetString(
@@ -877,7 +963,7 @@ uringcore_liburing_ring_init(
     uringcore_liburing_ring_close_resources(self);
     Py_CLEAR(self->supported_opcodes);
     memset(&params, 0, sizeof(params));
-    params.flags = IORING_SETUP_CQSIZE;
+    params.flags = IORING_SETUP_CQSIZE | (unsigned int)parsed_flags;
     params.cq_entries = cq_entries;
 
     result = io_uring_queue_init_params(entries, &self->ring, &params);
@@ -909,9 +995,35 @@ uringcore_liburing_ring_init(
 static void
 uringcore_liburing_ring_dealloc(UringCoreLiburingRing *self)
 {
+    PyObject_GC_UnTrack(self);
     uringcore_liburing_ring_close_resources(self);
     Py_CLEAR(self->supported_opcodes);
     Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static int
+uringcore_liburing_ring_traverse(
+    UringCoreLiburingRing *self,
+    visitproc visit,
+    void *arg)
+{
+    UringCoreLiburingRequest *request;
+
+    Py_VISIT(self->supported_opcodes);
+    request = self->request_head;
+    while (request != NULL) {
+        Py_VISIT(request);
+        request = request->next;
+    }
+    return 0;
+}
+
+static int
+uringcore_liburing_ring_clear(UringCoreLiburingRing *self)
+{
+    uringcore_liburing_ring_close_resources(self);
+    Py_CLEAR(self->supported_opcodes);
+    return 0;
 }
 
 static PyObject *
@@ -919,6 +1031,12 @@ uringcore_liburing_ring_close(
     UringCoreLiburingRing *self,
     PyObject *Py_UNUSED(ignored))
 {
+    if (self->waiting) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "cannot close a ring while another thread is waiting");
+        return NULL;
+    }
     if (self->buffers_in_use != 0) {
         PyErr_SetString(
             PyExc_BufferError,
@@ -967,6 +1085,12 @@ uringcore_liburing_ring_setup_buffer_pool(
     }
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (self->waiting) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "cannot set up a buffer pool while another thread is waiting");
         return NULL;
     }
     if (self->buffer_ring != NULL) {
@@ -1084,6 +1208,12 @@ uringcore_liburing_ring_get_sqe(UringCoreLiburingRing *self)
 
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (self->waiting) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "cannot prepare a request while another thread is waiting");
         return NULL;
     }
     sqe = io_uring_get_sqe(&self->ring);
@@ -1662,6 +1792,12 @@ uringcore_liburing_ring_submit(
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
         return NULL;
     }
+    if (self->waiting) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "cannot submit while another thread is waiting");
+        return NULL;
+    }
     generation = self->generation;
 
     while (self->prepared > 0) {
@@ -1853,6 +1989,12 @@ uringcore_liburing_ring_reap(
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
         return NULL;
     }
+    if (self->waiting) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "cannot reap while another thread is waiting");
+        return NULL;
+    }
     if (uringcore_liburing_ring_check_cq_dropped(self) < 0) {
         return NULL;
     }
@@ -2014,8 +2156,11 @@ uringcore_liburing_ring_wait(
     PyObject *timeout_object = Py_None;
     PyObject *max_completions_object = NULL;
     PyObject *timeout_index = NULL;
+    PyObject *max_completions_index = NULL;
     PyObject *reap_args;
     PyObject *result_object;
+    unsigned long parsed_max_completions;
+    unsigned int max_completions = 64;
     unsigned long long timeout_ns = 0;
     int has_timeout = 0;
     int result;
@@ -2032,6 +2177,10 @@ uringcore_liburing_ring_wait(
     }
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
+        return NULL;
+    }
+    if (self->waiting) {
+        PyErr_SetString(PyExc_RuntimeError, "another thread is already waiting");
         return NULL;
     }
     if (timeout_object != Py_None) {
@@ -2051,13 +2200,36 @@ uringcore_liburing_ring_wait(
         }
         has_timeout = 1;
     }
+    if (max_completions_object != NULL) {
+        max_completions_index = PyNumber_Index(max_completions_object);
+        if (max_completions_index == NULL) {
+            return NULL;
+        }
+        parsed_max_completions =
+            PyLong_AsUnsignedLong(max_completions_index);
+        Py_DECREF(max_completions_index);
+        if ((parsed_max_completions == (unsigned long)-1 &&
+             PyErr_Occurred()) ||
+            parsed_max_completions == 0 ||
+            parsed_max_completions > UINT_MAX) {
+            PyErr_Clear();
+            PyErr_Format(
+                PyExc_ValueError,
+                "max_completions must be between 1 and %u",
+                UINT_MAX);
+            return NULL;
+        }
+        max_completions = (unsigned int)parsed_max_completions;
+    }
 
     generation = self->generation;
     if (io_uring_cq_ready(&self->ring) == 0 &&
         (!has_timeout || timeout_ns != 0)) {
         struct io_uring_cqe *cqe;
 
+        self->waiting = 1;
         do {
+            Py_BEGIN_ALLOW_THREADS
             if (has_timeout) {
                 struct __kernel_timespec timeout = {
                     .tv_sec = (__kernel_time64_t)(
@@ -2070,17 +2242,27 @@ uringcore_liburing_ring_wait(
             else {
                 result = io_uring_wait_cqe(&self->ring, &cqe);
             }
-            if (result == -EINTR && PyErr_CheckSignals() < 0) {
-                return NULL;
-            }
-            if (result == -EINTR &&
-                (!self->initialized || self->generation != generation)) {
-                PyErr_SetString(
-                    PyExc_RuntimeError,
-                    "ring changed while completion wait was interrupted");
-                return NULL;
+            Py_END_ALLOW_THREADS
+            if (result == -EINTR) {
+                self->waiting = 0;
+                if (PyErr_CheckSignals() < 0) {
+                    return NULL;
+                }
+                if (!self->initialized || self->generation != generation) {
+                    PyErr_SetString(
+                        PyExc_RuntimeError,
+                        "ring changed while completion wait was interrupted");
+                    return NULL;
+                }
+                if (has_timeout) {
+                    /* Return control to the event loop instead of restarting
+                     * the full relative timeout after every handled signal. */
+                    return PyList_New(0);
+                }
+                self->waiting = 1;
             }
         } while (result == -EINTR);
+        self->waiting = 0;
         if (result == -ETIME) {
             return PyList_New(0);
         }
@@ -2090,14 +2272,9 @@ uringcore_liburing_ring_wait(
         }
     }
 
+    max_completions_object = PyLong_FromUnsignedLong(max_completions);
     if (max_completions_object == NULL) {
-        max_completions_object = PyLong_FromLong(64);
-        if (max_completions_object == NULL) {
-            return NULL;
-        }
-    }
-    else {
-        Py_INCREF(max_completions_object);
+        return NULL;
     }
     reap_args = PyTuple_Pack(1, max_completions_object);
     Py_DECREF(max_completions_object);
@@ -2126,7 +2303,12 @@ uringcore_liburing_ring_exit(
     UringCoreLiburingRing *self,
     PyObject *Py_UNUSED(args))
 {
-    uringcore_liburing_ring_close_resources(self);
+    PyObject *result = uringcore_liburing_ring_close(self, NULL);
+
+    if (result == NULL) {
+        return NULL;
+    }
+    Py_DECREF(result);
     Py_RETURN_FALSE;
 }
 
@@ -2449,7 +2631,7 @@ static PyGetSetDef uringcore_liburing_ring_getset[] = {
 
 PyDoc_STRVAR(
     uringcore_liburing_ring_doc,
-    "Ring(entries=256)\n"
+    "Ring(entries=256, cq_entries=None, supported_opcodes=None, flags=0)\n"
     "--\n"
     "\n"
     "Own an io_uring lifecycle through statically linked liburing.");
@@ -2459,13 +2641,15 @@ static PyTypeObject UringCoreLiburingRingType = {
     .tp_name = "uringloop._uringcore.Ring",
     .tp_basicsize = sizeof(UringCoreLiburingRing),
     .tp_dealloc = (destructor)uringcore_liburing_ring_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
     .tp_doc = uringcore_liburing_ring_doc,
     .tp_methods = uringcore_liburing_ring_methods,
     .tp_members = uringcore_liburing_ring_members,
     .tp_getset = uringcore_liburing_ring_getset,
     .tp_init = (initproc)uringcore_liburing_ring_init,
     .tp_new = uringcore_liburing_ring_new,
+    .tp_traverse = (traverseproc)uringcore_liburing_ring_traverse,
+    .tp_clear = (inquiry)uringcore_liburing_ring_clear,
 };
 
 static PyModuleDef uringcore_module = {
@@ -2526,7 +2710,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 7) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 8) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(

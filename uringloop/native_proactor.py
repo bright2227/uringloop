@@ -38,11 +38,9 @@ class NativeIoUringProactor:
     """Asyncio proactor backed by the native Phase 1 ring core."""
 
     def __init__(self, entries: int = 256, flags: int = 0):
-        if flags:
-            raise ValueError("native ring setup flags are not exposed")
         self._loop: events.AbstractEventLoop | None = None
         self._results: list[futures.Future[Any]] = []
-        self._ring: Any | None = _uringcore.Ring(entries)
+        self._ring: Any | None = _uringcore.Ring(entries, flags=flags)
         self._cache: dict[Any, _Pending] = {}
         self._pending_submit = False
         self._stopped_serving: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -284,11 +282,28 @@ class NativeIoUringProactor:
         request = future._request
         if request is None or request not in self._cache:
             return
+        if request.state == "prepared":
+            self._flush()
         try:
             cancellation = self._prepare(self._ring.prepare_cancel, request)
         except (RuntimeError, ValueError):
             return
-        self._register(cancellation, None, self._cache[request].file, None)
+
+        def cancellation_complete(completion: Any):
+            if completion.result >= 0 or completion.result == -errno.ENOENT:
+                return
+            error = OSError(-completion.result, os.strerror(-completion.result))
+            if self._loop is None:
+                raise error
+            self._loop.call_exception_handler(
+                {
+                    "message": "Cancelling a native io_uring request failed",
+                    "exception": error,
+                    "future": future,
+                }
+            )
+
+        self._register(cancellation, None, self._cache[request].file, cancellation_complete)
 
     def _handle_completion(self, completion: Any):
         pending = self._cache.get(completion.request)
@@ -296,7 +311,11 @@ class NativeIoUringProactor:
             return
         if completion.final:
             self._cache.pop(completion.request, None)
-        if pending.future is None or pending.future.cancelled():
+        if pending.future is None:
+            if pending.handler is not None:
+                pending.handler(completion)
+            return
+        if pending.future.cancelled():
             return
         if pending.file in self._stopped_serving:
             pending.future.cancel()
@@ -324,17 +343,19 @@ class NativeIoUringProactor:
     def close(self):
         if self._ring is None:
             return
-        for pending in list(self._cache.values()):
-            if pending.future is not None and not pending.future.done():
-                pending.future.cancel()
-        deadline = time.monotonic() + 5
-        while self._cache and time.monotonic() < deadline:
-            self._poll(0.05)
-        if self._cache:
-            raise RuntimeError(f"native proactor failed to drain {len(self._cache)} requests during close")
-        self._ring.close()
-        self._ring = None
-        self._results = []
+        ring = self._ring
+        try:
+            for pending in list(self._cache.values()):
+                if pending.future is not None and not pending.future.done():
+                    pending.future.cancel()
+            deadline = time.monotonic() + 1
+            while self._cache and time.monotonic() < deadline:
+                self._poll(0.05)
+        finally:
+            ring.close()
+            self._ring = None
+            self._cache.clear()
+            self._results = []
 
     def __del__(self):
         try:

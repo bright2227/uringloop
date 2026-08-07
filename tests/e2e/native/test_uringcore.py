@@ -1,7 +1,9 @@
 import errno
+import gc
 import select
 import socket
 import tempfile
+import threading
 import time
 
 import pytest
@@ -10,7 +12,7 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 7
+    assert _uringcore.ABI_VERSION == 8
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
@@ -74,6 +76,12 @@ def test_native_ring_owns_and_releases_kernel_resources():
     assert ring.closed is True
 
 
+@pytest.mark.parametrize("flags", [-1, 2**32])
+def test_native_ring_rejects_out_of_range_setup_flags(flags):
+    with pytest.raises(ValueError, match="flags must be between"):
+        _uringcore.Ring(8, flags=flags)
+
+
 def test_native_ring_context_manager_closes_resources():
     with _uringcore.Ring(entries=8) as ring:
         assert ring.closed is False
@@ -134,10 +142,48 @@ def test_native_ring_waits_for_and_reaps_poll_completion():
         ring.close()
 
 
+def test_native_ring_wait_releases_gil_for_wakeup_thread():
+    ring = _uringcore.Ring(8)
+    receiver, sender = socket.socketpair()
+
+    def wake_waiter():
+        time.sleep(0.01)
+        sender.sendall(b"ready")
+
+    thread = threading.Thread(target=wake_waiter)
+    try:
+        request = ring.prepare_poll(receiver, select.POLLIN)
+        assert ring.submit() == 1
+        thread.start()
+
+        [completion] = ring.wait(timeout_ns=1_000_000_000)
+
+        assert completion.request is request
+        assert completion.result & select.POLLIN
+        thread.join(timeout=1)
+        assert thread.is_alive() is False
+    finally:
+        if thread.ident is not None:
+            thread.join(timeout=1)
+        receiver.close()
+        sender.close()
+        ring.close()
+
+
 def test_native_ring_wait_timeout_returns_without_completion():
     ring = _uringcore.Ring(8)
 
     assert ring.wait(timeout_ns=1_000_000) == []
+
+
+def test_native_ring_wait_validates_batch_size_before_blocking():
+    ring = _uringcore.Ring(8)
+    started = time.monotonic()
+
+    with pytest.raises(ValueError, match="max_completions must be between"):
+        ring.wait(timeout_ns=1_000_000_000, max_completions=0)
+
+    assert time.monotonic() - started < 0.1
 
 
 def test_native_ring_keeps_request_alive_until_completion():
@@ -220,6 +266,27 @@ def test_native_ring_models_asynchronous_cancellation_race():
     assert cancellation.state == "released"
     assert cancellation.cancelled is False
     assert ring.pending == 0
+
+
+def test_native_ring_models_completion_before_cancellation_race():
+    ring = _uringcore.Ring(8)
+    target = ring.prepare_nop()
+    assert ring.submit() == 1
+    deadline = time.monotonic() + 1
+    while ring.cq_ready == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert ring.cq_ready == 1
+
+    cancellation = ring.prepare_cancel(target)
+    assert ring.submit() == 1
+    completions = reap_completions(ring, 2)
+    by_request = {completion.request: completion for completion in completions}
+
+    assert by_request[target].result == 0
+    assert by_request[cancellation].result == -errno.ENOENT
+    assert target.cancelled is False
+    assert target.state == "released"
+    assert cancellation.state == "released"
 
 
 def test_native_ring_rejects_invalid_cancellation_targets():
@@ -361,6 +428,34 @@ def test_native_ring_send_and_recv_own_python_buffers():
     right.close()
 
 
+def test_native_ring_gc_breaks_file_owner_cycle():
+    class RingFile:
+        def __init__(self, ring, file):
+            self.ring = ring
+            self.file = file
+
+        def fileno(self):
+            return self.file.fileno()
+
+    receiver, sender = socket.socketpair()
+    buffer = bytearray(1)
+    ring = _uringcore.Ring(8)
+    owner = RingFile(ring, receiver)
+    request = ring.prepare_recv(owner, buffer)
+    assert ring.submit() == 1
+    with pytest.raises(BufferError):
+        buffer.extend(b"pinned")
+
+    del request
+    del owner
+    del ring
+    gc.collect()
+
+    buffer.extend(b"released")
+    receiver.close()
+    sender.close()
+
+
 def test_native_ring_reads_and_writes_files_with_owned_buffers():
     ring = _uringcore.Ring(8)
     with tempfile.TemporaryFile() as file:
@@ -415,6 +510,38 @@ def test_native_multishot_recv_returns_explicitly_owned_buffers():
     ring.close()
     left.close()
     right.close()
+
+
+def test_native_ring_context_exit_preserves_owned_provided_buffer():
+    left, right = socket.socketpair(type=socket.SOCK_DGRAM)
+    ring = _uringcore.Ring(8)
+    request = None
+    selected = None
+    try:
+        with pytest.raises(BufferError, match="provided buffers are in use"):
+            with ring:
+                ring.setup_buffer_pool(2, 64)
+                request = ring.prepare_recv_multishot(left)
+                assert ring.submit() == 1
+                right.send(b"owned")
+                [completion] = reap_completions(ring, 1)
+                selected = completion.buffer
+
+        assert ring.closed is False
+        assert selected.to_bytes() == b"owned"
+        selected.release()
+        cancellation = ring.prepare_cancel(request)
+        assert ring.submit() == 1
+        assert {item.request for item in reap_completions(ring, 2)} == {
+            request,
+            cancellation,
+        }
+    finally:
+        if selected is not None and not selected.released:
+            selected.release()
+        ring.close()
+        left.close()
+        right.close()
 
 
 def test_native_multishot_recv_applies_backpressure_and_rearms():

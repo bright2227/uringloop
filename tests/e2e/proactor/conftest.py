@@ -8,7 +8,7 @@ from typing import AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
 
-from uringloop.proactor import IoUringProactor
+from uringloop.proactor import IoUringProactor, _CffiIoUringProactor
 
 
 @pytest.fixture
@@ -76,11 +76,14 @@ def server_udp_sock() -> Generator[socket.socket, None, None]:
     sock.close()
 
 
-@pytest_asyncio.fixture
-async def init_proactor() -> AsyncGenerator[IoUringProactor, None]:
+@pytest_asyncio.fixture(
+    params=[IoUringProactor, _CffiIoUringProactor],
+    ids=["native", "cffi-oracle"],
+)
+async def init_proactor(request: pytest.FixtureRequest) -> AsyncGenerator[IoUringProactor, None]:
     """Fixture to create and clean up the proactor and its polling task."""
     loop = asyncio.get_running_loop()
-    proactor = IoUringProactor()
+    proactor = request.param()
     proactor.set_loop(loop)
 
     # Create a task that polls the proactor frequently

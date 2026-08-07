@@ -59,6 +59,22 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             # TODO make sure https://github.com/python/cpython/blob/d16f455cd8cabbc1e7bd2369cdb8718c30ab8957/Lib/asyncio/windows_events.py#L328-L333
             self._self_reading_future = None
 
+    def run_forever(self):
+        # Python 3.14+ calls the setup/cleanup hooks above. Python 3.12 and
+        # 3.13 inline the run loop and therefore need the proactor self-read
+        # lifecycle here so call_soon_threadsafe can wake an idle ring wait.
+        if hasattr(super(), "_run_forever_setup"):
+            return super().run_forever()
+
+        assert self._self_reading_future is None
+        self.call_soon(self._loop_self_reading)
+        try:
+            return super().run_forever()
+        finally:
+            if self._self_reading_future is not None:
+                self._self_reading_future.cancel()
+                self._self_reading_future = None
+
     async def sock_sendall(self, sock: socket.socket | io.IOBase, data: Buffer):
         view = memoryview(data).cast("B")
         while len(view) > 0:

@@ -86,6 +86,7 @@ class Ring:
         entries: int = 256,
         cq_entries: int | None = None,
         supported_opcodes: Iterable[int] | None = None,
+        flags: int = 0,
     ) -> None: ...
     @property
     def sq_entries(self) -> int: ...
