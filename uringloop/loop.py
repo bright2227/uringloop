@@ -235,17 +235,21 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         """
         pidfd_open = getattr(os, "pidfd_open", None)
         if pidfd_open is None:
-            thread = threading.Thread(
-                target=self._waitpid_in_thread,
-                args=(pid, transp),
-                name=f"uringloop-waitpid-{pid}",
-                daemon=True,
-            )
-            thread.start()
+            self._start_waitpid_thread(pid, transp)
             return
 
-        pidfd = pidfd_open(pid)
-        fut: futures.Future[int] = self._proactor.poll_add(pidfd, POLLIN)
+        pidfd = None
+        try:
+            pidfd = pidfd_open(pid)
+            fut: futures.Future[int] = self._proactor.poll_add(pidfd, POLLIN)
+        except (OSError, RuntimeError):
+            if pidfd is not None:
+                try:
+                    os.close(pidfd)
+                except OSError:
+                    pass
+            self._start_waitpid_thread(pid, transp)
+            return
 
         def _child_exited(fut: futures.Future[int]):
             try:
@@ -266,6 +270,15 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             self.call_soon(transp._process_exited, returncode)  # type: ignore[reportPrivateUsage]
 
         fut.add_done_callback(_child_exited)
+
+    def _start_waitpid_thread(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):  # type: ignore[reportPrivateUsage]
+        thread = threading.Thread(
+            target=self._waitpid_in_thread,
+            args=(pid, transp),
+            name=f"uringloop-waitpid-{pid}",
+            daemon=True,
+        )
+        thread.start()
 
     def _waitpid_in_thread(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):  # type: ignore[reportPrivateUsage]
         while True:

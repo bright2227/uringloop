@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import os
 from typing import Any
 
@@ -96,3 +97,48 @@ async def test_subprocess_without_os_pidfd_open(monkeypatch: pytest.MonkeyPatch)
     process = await asyncio.create_subprocess_exec("/bin/sh", "-c", "exit 7")
 
     assert await process.wait() == 7
+
+
+@pytest.mark.asyncio
+async def test_subprocess_when_pidfd_open_fails(monkeypatch: pytest.MonkeyPatch):
+    def unavailable_pidfd(pid: int):
+        raise OSError(errno.EPERM, "pidfd_open blocked", pid)
+
+    monkeypatch.setattr(os, "pidfd_open", unavailable_pidfd, raising=False)
+
+    process = await asyncio.create_subprocess_exec("/bin/sh", "-c", "exit 8")
+
+    assert await process.wait() == 8
+
+
+@pytest.mark.asyncio
+async def test_subprocess_when_pidfd_poll_registration_fails(monkeypatch: pytest.MonkeyPatch):
+    event_loop = asyncio.get_running_loop()
+    assert isinstance(event_loop, IoUringProactorEventLoop)
+    if not hasattr(os, "pidfd_open"):
+        pytest.skip("os.pidfd_open is unavailable")
+
+    opened_pidfds = set()
+    pidfd_open = os.pidfd_open
+    poll_add = event_loop._proactor.poll_add  # type: ignore[reportPrivateUsage]
+
+    def tracked_pidfd_open(pid: int):
+        fd = pidfd_open(pid)
+        opened_pidfds.add(fd)
+        return fd
+
+    def failing_poll_add(file, events):
+        if isinstance(file, int) and file in opened_pidfds:
+            raise OSError(errno.EIO, "pidfd poll registration failed")
+        return poll_add(file, events)
+
+    monkeypatch.setattr(os, "pidfd_open", tracked_pidfd_open)
+    monkeypatch.setattr(event_loop._proactor, "poll_add", failing_poll_add)  # type: ignore[reportPrivateUsage]
+
+    process = await asyncio.create_subprocess_exec("/bin/sh", "-c", "exit 9")
+
+    assert await process.wait() == 9
+    assert len(opened_pidfds) == 1
+    with pytest.raises(OSError) as error:
+        os.fstat(opened_pidfds.pop())
+    assert error.value.errno == errno.EBADF
