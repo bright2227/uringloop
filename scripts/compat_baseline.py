@@ -2,6 +2,7 @@
 """Run and summarize the pinned CPython-derived asyncio compatibility suite."""
 
 import argparse
+import ast
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -26,15 +27,68 @@ def load_upstream(version: str) -> tuple[dict, dict]:
         raise SystemExit(f"no tracked CPython asyncio revision for Python {version}") from error
 
 
-def verify_upstream_sources(upstream: dict) -> list[dict[str, str]]:
+def adaptation_methods_for_source(filename: str, source: str, adaptations: dict[str, dict[str, str]]) -> list[str]:
+    tree = ast.parse(source)
+    methods = []
+    for local_test, adaptation in adaptations.items():
+        reference = adaptation["upstream"]
+        try:
+            source_file, method = reference.split("::", 1)
+        except ValueError as error:
+            raise RuntimeError(f"invalid upstream adaptation reference for {local_test}: {reference}") from error
+        if source_file != filename:
+            continue
+        owners = [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method for child in node.body)
+        ]
+        if not owners:
+            raise RuntimeError(f"upstream method {reference} for {local_test} was not found")
+        if len(owners) != 1:
+            raise RuntimeError(f"upstream method {reference} for {local_test} has ambiguous owners: {owners}")
+        methods.append(f"{owners[0]}::{method}")
+    return sorted(methods)
+
+
+def local_contract_names(path: Path = ROOT / "tests" / "compat" / "test_cpython_asyncio.py") -> set[str]:
+    tree = ast.parse(path.read_text())
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+    }
+
+
+def verify_adaptation_coverage(adaptations: dict[str, dict[str, str]]) -> None:
+    local_tests = local_contract_names()
+    manifest_tests = set(adaptations)
+    missing = sorted(local_tests - manifest_tests)
+    stale = sorted(manifest_tests - local_tests)
+    if missing or stale:
+        raise RuntimeError(f"adaptation coverage mismatch; missing={missing}, stale={stale}")
+    missing_summaries = sorted(name for name, adaptation in adaptations.items() if not adaptation.get("summary", "").strip())
+    if missing_summaries:
+        raise RuntimeError(f"adaptations require non-empty summaries: {', '.join(missing_summaries)}")
+
+
+def verify_upstream_sources(upstream: dict, adaptations: dict[str, dict[str, str]]) -> list[dict[str, object]]:
+    verify_adaptation_coverage(adaptations)
+    referenced_files = {adaptation["upstream"].split("::", 1)[0] for adaptation in adaptations.values()}
+    missing_sources = sorted(referenced_files - upstream["sources"].keys())
+    if missing_sources:
+        raise RuntimeError(f"adaptations reference unverified upstream sources: {', '.join(missing_sources)}")
     verified = []
     for filename, expected in upstream["sources"].items():
         url = f"https://raw.githubusercontent.com/python/cpython/{upstream['commit']}/Lib/test/test_asyncio/{filename}"
         with urlopen(url, timeout=30) as response:
-            digest = hashlib.sha256(response.read()).hexdigest()
+            contents = response.read()
+        digest = hashlib.sha256(contents).hexdigest()
         if digest != expected:
             raise RuntimeError(f"upstream digest mismatch for {filename}: expected {expected}, found {digest}")
-        verified.append({"file": filename, "sha256": digest, "url": url})
+        methods = adaptation_methods_for_source(filename, contents.decode(), adaptations)
+        verified.append({"file": filename, "methods": methods, "sha256": digest, "url": url})
     return verified
 
 
@@ -74,7 +128,7 @@ def main() -> int:
     args = parser.parse_args()
     version = f"{sys.version_info.major}.{sys.version_info.minor}"
     manifest, upstream = load_upstream(version)
-    verified_sources = verify_upstream_sources(upstream) if args.verify_upstream else []
+    verified_sources = verify_upstream_sources(upstream, manifest["adaptations"]) if args.verify_upstream else []
 
     with tempfile.TemporaryDirectory() as directory:
         xml_path = Path(directory) / "compat.xml"

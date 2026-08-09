@@ -1,5 +1,8 @@
+import pytest
+
 from benchmarks.phase1 import Workload, matrix, parse_strace_summary, percentile
-from scripts.compat_baseline import summarize
+from benchmarks.phase2 import SchedulingWorkload, matrix as scheduling_matrix, worker_result
+from scripts.compat_baseline import adaptation_methods_for_source, summarize, verify_adaptation_coverage
 
 
 def test_full_benchmark_matrix_covers_phase_zero_dimensions():
@@ -21,6 +24,43 @@ def test_benchmark_operation_counts_match_each_api():
     assert Workload("socket", 4, 64, 10).operations == 40
     assert Workload("streams", 4, 64, 10).operations == 40
     assert Workload("file", 1, 4096, 10).operations == 10
+
+
+def test_full_scheduling_matrix_covers_phase_two_dimensions():
+    workloads = scheduling_matrix("full")
+
+    assert {item.kind for item in workloads} == {
+        "ready",
+        "timer_equal",
+        "timer_spread",
+        "timer_cancel",
+        "mixed",
+        "threadsafe_idle",
+        "threadsafe_burst",
+    }
+    assert {item.operations for item in workloads if item.kind == "ready"} == {1, 64, 4096}
+    assert {item.operations for item in workloads if item.kind == "timer_equal"} == {1, 1000, 100000}
+    assert {item.producers for item in workloads if item.kind == "threadsafe_burst"} == {1, 4}
+    [idle] = [item for item in workloads if item.kind == "threadsafe_idle"]
+    assert idle.producers == 1
+    assert idle.idle_settle_ns > 0
+    assert all(item.lead_ns > 0 and item.spread_ns >= 2_000_000_000 for item in workloads if item.kind == "timer_spread")
+    assert SchedulingWorkload("timer_cancel", 100000, cancel_every=2) in workloads
+
+
+def test_scheduling_worker_reports_ready_and_cancelled_timer_samples():
+    ready = worker_result("asyncio", SchedulingWorkload("ready", 8), warmup=0, repeats=2)
+    timers = worker_result(
+        "asyncio",
+        SchedulingWorkload("timer_cancel", 8, cancel_every=2),
+        warmup=0,
+        repeats=2,
+    )
+
+    assert len(ready["samples"]) == 2
+    assert ready["summary"]["latencies"]["ready"]["samples"] == 16
+    assert timers["summary"]["latencies"]["timer"]["samples"] == 8
+    assert all(sample["operations_per_second"] > 0 for sample in ready["samples"] + timers["samples"])
 
 
 def test_strace_summary_extracts_per_syscall_counts(tmp_path):
@@ -52,3 +92,28 @@ def test_compatibility_baseline_records_skip_reasons(tmp_path):
     assert result["passed"] == 1
     assert result["pass_rate_percent"] == 50
     assert result["skip_reasons"] == [{"test": "compat.skipped", "reason": "documented reason"}]
+
+
+def test_compatibility_provenance_requires_referenced_method():
+    adaptations = {
+        "test_local_contract": {
+            "summary": "Local adaptation summary.",
+            "upstream": "test_events.py::test_upstream_contract",
+        }
+    }
+    source = "class ContractTests:\n    def test_upstream_contract(self):\n        pass\n"
+
+    assert adaptation_methods_for_source("test_events.py", source, adaptations) == ["ContractTests::test_upstream_contract"]
+
+    with pytest.raises(RuntimeError, match="was not found"):
+        adaptations["test_local_contract"]["upstream"] = "test_events.py::missing"
+        adaptation_methods_for_source("test_events.py", source, adaptations)
+
+
+def test_compatibility_manifest_covers_every_local_contract():
+    import json
+    from pathlib import Path
+
+    manifest = json.loads((Path(__file__).parents[1] / "compat" / "upstream.json").read_text())
+
+    verify_adaptation_coverage(manifest["adaptations"])

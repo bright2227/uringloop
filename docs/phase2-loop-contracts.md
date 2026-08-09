@@ -55,12 +55,17 @@ behavior.
 ## Benchmark definitions
 
 - Ready queue: enqueue and execute 1, 64, and 4,096 callbacks per tick.
-- Timers: insert/cancel/expire 1, 1,000, and 100,000 timers with both equal and
-  distributed deadlines.
-- Mixed tick: ready callbacks plus socket completions plus due timers, recording
-  starvation as well as throughput.
-- Cross-thread: producer-to-callback latency for one producer and contended
-  producer threads while the consumer loop is idle.
+- Timers: insert/cancel/expire 1, 1,000, and 100,000 timers. Distributed timers
+  receive a 250 ms insertion lead and span two seconds, so their deadlines do
+  not collapse into an already-overdue equal-deadline batch.
+- Mixed tick: ready callbacks plus socket completions plus due timers. Ready
+  queue delay, timer lateness, and socket round-trip latency are reported as
+  separate p50, p99, and maximum service-delay distributions.
+- Cross-thread idle wakeup: one producer submits one callback, waits for its
+  acknowledgement, then allows the consumer to re-enter its kernel wait before
+  the next measured submission. Wakeup latency is the primary metric.
+- Cross-thread burst contention: one and four producers submit without the idle
+  handshake; this separately measures enqueue contention and callback draining.
 - Metrics: wall time, process CPU, operations/s, p50/p99 latency, RSS, syscall
   counts, CV, Python allocations where reliable, and environment metadata.
 
@@ -76,7 +81,8 @@ behavior.
 
 ## Exit criteria
 
-- The new contracts pass without changing production loop code.
+- The new fake-clock, handle, real-loop, and compatibility contracts pass on
+  both the native and retained CFFI proactors without production loop changes.
 - Every compatibility adaptation records its exact CPython method, commit,
   source hash, adaptation summary, and skip reason if applicable.
 - Benchmark smoke jobs are deterministic enough for regression detection;
