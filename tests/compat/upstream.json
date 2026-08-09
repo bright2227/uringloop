@@ -9,16 +9,16 @@
       "upstream": "test_base_events.py::test__run_once"
     },
     "test_call_soon_captures_context_at_scheduling_time": {
-      "summary": "Checks the scheduled Context snapshot through call_soon rather than constructing Handle directly.",
-      "upstream": "test_events.py::test_handle_context"
+      "summary": "Applies CPython's Context snapshot behavior to a call_soon callback rather than a Task.",
+      "upstream": "test_tasks.py::test_context_1"
     },
     "test_call_at_past_deadline_runs_promptly": {
       "summary": "Uses a real loop and bounded future instead of CPython's mocked selector clock.",
-      "upstream": "test_base_events.py::test_call_at"
+      "upstream": "test_base_events.py::test_time_and_call_at"
     },
     "test_handle_cancel_is_idempotent_and_prevents_callback": {
       "summary": "Combines repeat cancellation state with the observable callback suppression contract.",
-      "upstream": "test_events.py::test_handle_cancel"
+      "upstream": "test_events.py::test_handle"
     },
     "test_timer_handle_comparison_and_cancellation": {
       "summary": "Keeps TimerHandle equality and ordering assertions and verifies cancellation changes equality.",
@@ -41,8 +41,8 @@
       "upstream": "test_events.py::test_run_in_executor"
     },
     "test_call_soon_threadsafe_captures_producer_context": {
-      "summary": "Extends Handle context capture through a foreign producer thread and the loop wakeup path.",
-      "upstream": "test_events.py::test_handle_context"
+      "summary": "Extends CPython's foreign-thread scheduling contract with an assertion on the producer Context snapshot.",
+      "upstream": "test_events.py::test_call_soon_threadsafe"
     },
     "test_callback_exception_reaches_exception_handler": {
       "summary": "Captures the public exception-handler context without CPython's logging mocks.",

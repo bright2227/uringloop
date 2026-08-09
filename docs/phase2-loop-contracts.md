@@ -69,6 +69,14 @@ behavior.
 - Metrics: wall time, process CPU, operations/s, p50/p99 latency, RSS, syscall
   counts, CV, Python allocations where reliable, and environment metadata.
 
+## Captured baseline
+
+`benchmarks/results/phase2-contracts-2026-08-10-wsl2.json` is the raw smoke
+baseline captured from harness commit `9e2e74b` on Python 3.13. It contains five
+measured repetitions and syscall summaries for all 24 backend/workload pairs.
+The file is an auditable Phase 1-loop reference for later Phase 2 branches, not
+a performance claim or release threshold.
+
 ## Non-goals and risks
 
 - Do not modify `uringloop/loop.py`, the extension ABI, or default loop
