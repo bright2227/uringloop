@@ -34,6 +34,10 @@ dev = [
     "twine>=6.1.0",
 ]
 
+[tool.uv]
+# twine -> keyring -> SecretStorage; CVE-2026-69249 is fixed in 49.0.0.
+constraint-dependencies = ["cryptography>=49.0.0"]
+
 ## pytest
 [tool.pytest.ini_options]
 # the e2e tests drive a real event loop; a wedged loop should fail the
