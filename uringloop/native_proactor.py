@@ -173,6 +173,20 @@ class NativeIoUringProactor:
         self._results = []
         return results
 
+    def select_batch(self, timeout: float | None, max_events: int):
+        if max_events < 1:
+            raise ValueError("max_events must be positive")
+        if not self._results:
+            self._check_closed()
+            self._flush()
+            timeout_ns = None if timeout is None else max(0, int(timeout * 1_000_000_000))
+            for completion in self._ring.wait(timeout_ns=timeout_ns, max_completions=max_events):
+                self._handle_completion(completion)
+        results = self._results[:max_events]
+        del self._results[:max_events]
+        immediate = bool(self._results) or self._ring.cq_ready or self._ring.cq_overflowed
+        return results, immediate
+
     def recv(self, conn: socket.socket | IOBase, nbytes: int, flags: int = 0):
         buffer = bytearray(nbytes)
         if isinstance(conn, socket.socket):

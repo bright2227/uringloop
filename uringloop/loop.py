@@ -86,6 +86,7 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         ready_queue: str = "python",
         timer_heap: str = "python",
         thread_wakeup: str = "socketpair",
+        run_loop: str = "python",
     ):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
@@ -98,13 +99,23 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             raise ValueError("the native timer heap requires ready_queue='native'")
         if thread_wakeup not in {"socketpair", "eventfd"}:
             raise ValueError("thread_wakeup must be 'socketpair' or 'eventfd'")
+        if run_loop not in {"python", "native"}:
+            raise ValueError("run_loop must be 'python' or 'native'")
+        if run_loop == "native" and (ready_queue != "native" or timer_heap != "native"):
+            raise ValueError("the native run loop requires native ready and timer storage")
         if proactor is None:
             proactor = IoUringProactor()
         super().__init__(proactor)
         self._proactor: IoUringProactor
         self._ready_queue_mode = ready_queue
         self._timer_heap_mode = timer_heap
+        self._run_loop_mode = run_loop
         self._timer_core = None
+        self._native_tick_batch = deque()
+        self._native_tick_immediate = False
+        self._native_cqe_budget = 256
+        self._native_timer_budget = 4096
+        self._native_ready_budget = 4096
         self._thread_wakeup_mode = thread_wakeup
         self._eventfd_wakeup = None
         self._eventfd_poll_future = None
@@ -200,6 +211,8 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         return timer
 
     def _run_once(self):
+        if self._run_loop_mode == "native":
+            return self._run_once_native_tick()
         if self._timer_core is None:
             return super()._run_once()
 
@@ -252,6 +265,66 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
                 handle._run()
         handle = None
 
+    def _run_once_native_tick(self):
+        core = self._timer_core
+        scheduled_count = core.timer_count
+        if (
+            scheduled_count > base_events._MIN_SCHEDULED_TIMER_HANDLES
+            and self._timer_cancelled_count / scheduled_count > base_events._MIN_CANCELLED_TIMER_HANDLES_FRACTION
+        ):
+            core.compact_timers()
+            self._timer_cancelled_count = 0
+
+        immediate = bool(self._native_tick_batch) or self._stopping or self._native_tick_immediate
+        timeout = core.prepare_tick(self.time(), base_events.MAXIMUM_SELECT_TIMEOUT, immediate)
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+
+        select_batch = getattr(self._selector, "select_batch", None)
+        if select_batch is None:
+            event_list = self._selector.select(timeout)
+            completion_budget_exhausted = False
+        else:
+            event_list, completion_budget_exhausted = select_batch(timeout, self._native_cqe_budget)
+        self._process_events(event_list)
+        event_list = None
+
+        batch, storage_immediate, _ = core.finish_tick(
+            self.time(),
+            self._clock_resolution,
+            self._native_timer_budget,
+            self._native_ready_budget,
+        )
+        self._native_tick_batch.extend(batch)
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+        dispatch_count = min(len(self._native_tick_batch), self._native_ready_budget)
+        self._native_tick_immediate = completion_budget_exhausted or storage_immediate
+
+        for _ in range(dispatch_count):
+            handle = self._native_tick_batch.popleft()
+            if handle._cancelled:
+                continue
+            if self._debug:
+                try:
+                    self._current_handle = handle
+                    started = self.time()
+                    handle._run()
+                    elapsed = self.time() - started
+                    if elapsed >= self.slow_callback_duration:
+                        logger.warning(
+                            "Executing %s took %.3f seconds",
+                            base_events._format_handle(handle),
+                            elapsed,
+                        )
+                finally:
+                    self._current_handle = None
+            else:
+                handle._run()
+        if self._native_tick_batch:
+            self._native_tick_immediate = True
+        handle = None
+
     def close(self):
         ready = self._ready
         wakeup = self._eventfd_wakeup
@@ -267,6 +340,7 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             if wakeup is not None:
                 self._eventfd_wakeup = None
                 wakeup.close()
+        self._native_tick_batch.clear()
         if isinstance(ready, _NativeReadyQueue):
             ready.close()
 

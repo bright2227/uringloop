@@ -1,4 +1,5 @@
 from asyncio import base_events
+from collections import deque
 
 from uringloop import _uringcore
 from uringloop.loop import IoUringProactorEventLoop, _NativeReadyQueue
@@ -20,9 +21,21 @@ def native_timer_loop(now=1000.0):
     loop._selector = NullSelector()
     loop._timer_core = core
     loop._timer_heap_mode = "native"
+    loop._run_loop_mode = "python"
     loop._ready_queue_mode = "native"
     loop._ready = _NativeReadyQueue(core)
     loop.time = lambda: now
+    return loop
+
+
+def native_tick_loop(now=1000.0, *, ready_budget=4096, timer_budget=4096):
+    loop = native_timer_loop(now)
+    loop._run_loop_mode = "native"
+    loop._native_tick_batch = deque()
+    loop._native_tick_immediate = False
+    loop._native_cqe_budget = 256
+    loop._native_timer_budget = timer_budget
+    loop._native_ready_budget = ready_budget
     return loop
 
 
@@ -93,5 +106,62 @@ def test_native_timer_callbacks_schedule_for_the_next_tick():
         assert called == ["first"]
         loop._run_once()
         assert called == ["first", "nested"]
+    finally:
+        close_test_loop(loop)
+
+
+def test_native_tick_applies_ready_budget_and_forces_nonblocking_followup():
+    loop = native_tick_loop(ready_budget=2)
+    called = []
+    try:
+        for index in range(5):
+            loop.call_soon(called.append, index)
+
+        loop._run_once()
+        assert called == [0, 1]
+        assert loop._native_tick_immediate is True
+        assert loop._selector.timeouts == [0.0]
+
+        loop._run_once()
+        loop._run_once()
+        assert called == [0, 1, 2, 3, 4]
+        assert loop._timer_core.tick_count == 3
+    finally:
+        close_test_loop(loop)
+
+
+def test_native_tick_preserves_current_snapshot_and_defers_nested_callback():
+    loop = native_tick_loop()
+    called = []
+
+    def first():
+        called.append("first")
+        loop.call_soon(called.append, "nested")
+
+    try:
+        loop.call_soon(first)
+        loop.call_soon(called.append, "peer")
+        loop._run_once()
+        assert called == ["first", "peer"]
+        loop._run_once()
+        assert called == ["first", "peer", "nested"]
+    finally:
+        close_test_loop(loop)
+
+
+def test_native_tick_promotes_only_timer_budget_per_iteration():
+    loop = native_tick_loop(timer_budget=2)
+    called = []
+    try:
+        for index in range(5):
+            loop.call_at(1000.0, called.append, index)
+
+        loop._run_once()
+        assert called == [0, 1]
+        assert loop._native_tick_immediate is True
+        loop._run_once()
+        loop._run_once()
+        assert called == [0, 1, 2, 3, 4]
+        assert loop._timer_core.timer_budget_exhaustions == 2
     finally:
         close_test_loop(loop)

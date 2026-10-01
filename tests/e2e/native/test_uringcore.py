@@ -19,7 +19,7 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 11
+    assert _uringcore.ABI_VERSION == 12
     assert _uringcore.EventFD.__module__ == "uringloop._uringcore"
     assert _uringcore.LoopCore.__module__ == "uringloop._uringcore"
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
@@ -354,6 +354,74 @@ def test_loop_core_timer_promotion_rejects_negative_bounds(now, resolution, limi
     core = _uringcore.LoopCore()
     with pytest.raises(ValueError, match=message):
         core.promote_due(now, resolution, limit)
+
+
+def test_loop_core_native_tick_computes_timeout_and_bounded_handoff():
+    core = _uringcore.LoopCore()
+    assert core.prepare_tick(10.0, 5.0, False) is None
+    future = Timer("future")
+    core.schedule_timer(future, 20.0)
+    assert core.prepare_tick(10.0, 5.0, False) == 5.0
+    assert core.prepare_tick(21.0, 5.0, False) == 0.0
+    core.clear_timers()
+    core.schedule_timer(Timer("nan"), float("nan"))
+    assert core.prepare_tick(10.0, 5.0, False) == 0.0
+
+    core.clear_timers()
+    ready = [Timer(f"ready-{index}") for index in range(3)]
+    due = [Timer(f"due-{index}") for index in range(3)]
+    for handle in ready:
+        core.enqueue_ready(handle)
+    for handle in due:
+        core.schedule_timer(handle, 10.0)
+
+    batch, immediate, promoted = core.finish_tick(10.0, 0.1, 1, 2)
+    assert batch == ready[:2]
+    assert immediate is True
+    assert promoted == 1
+    assert core.ready_budget_exhaustions == 1
+    assert core.timer_budget_exhaustions == 1
+
+    batch, immediate, promoted = core.finish_tick(10.0, 0.1, 10, 10)
+    assert batch[0] is ready[2]
+    assert sorted(handle.name for handle in batch[1:]) == sorted(handle.name for handle in due)
+    assert immediate is False
+    assert promoted == 2
+    assert core.tick_count == 2
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [
+        ("prepare_tick", (0.0, -1.0, False)),
+        ("prepare_tick", (0.0, float("nan"), False)),
+        ("prepare_tick", (0.0, float("inf"), False)),
+        ("finish_tick", (0.0, 0.0, 0, 1)),
+        ("finish_tick", (0.0, 0.0, 1, 0)),
+        ("finish_tick", (0.0, float("nan"), 1, 1)),
+        ("finish_tick", (0.0, float("inf"), 1, 1)),
+    ],
+)
+def test_loop_core_native_tick_rejects_invalid_control_inputs(method, args):
+    core = _uringcore.LoopCore()
+    with pytest.raises(ValueError):
+        getattr(core, method)(*args)
+
+
+def test_loop_core_native_tick_promotion_failure_preserves_timer_and_ready_state():
+    core = _uringcore.LoopCore(max_ready=1)
+    ready = Timer("ready")
+    due = Timer("due")
+    core.enqueue_ready(ready)
+    core.schedule_timer(due, 0.0)
+
+    with pytest.raises(MemoryError):
+        core.finish_tick(0.0, 0.1, 1, 1)
+
+    assert core.timer_count == 1
+    assert core.ready_count == 1
+    assert core.take_ready_batch(1) == [ready]
+    assert core.next_deadline() == 0.0
 
 
 def reap_completions(ring, count):

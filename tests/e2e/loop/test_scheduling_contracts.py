@@ -10,25 +10,29 @@ from uringloop.proactor import IoUringProactor, _CffiIoUringProactor
 
 @pytest.fixture(
     params=[
-        (IoUringProactor, "python", "python"),
-        (IoUringProactor, "native", "python"),
-        (IoUringProactor, "native", "native"),
-        (_CffiIoUringProactor, "python", "python"),
-        (_CffiIoUringProactor, "native", "python"),
-        (_CffiIoUringProactor, "native", "native"),
+        (IoUringProactor, "python", "python", "python"),
+        (IoUringProactor, "native", "python", "python"),
+        (IoUringProactor, "native", "native", "python"),
+        (IoUringProactor, "native", "native", "native"),
+        (_CffiIoUringProactor, "python", "python", "python"),
+        (_CffiIoUringProactor, "native", "python", "python"),
+        (_CffiIoUringProactor, "native", "native", "python"),
+        (_CffiIoUringProactor, "native", "native", "native"),
     ],
     ids=[
         "native-python",
         "native-native-ready",
         "native-native-timers",
+        "native-native-tick",
         "cffi-python",
         "cffi-native-ready",
         "cffi-native-timers",
+        "cffi-native-tick",
     ],
 )
 def loop(request):
-    proactor_factory, ready_queue, timer_heap = request.param
-    event_loop = IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue, timer_heap=timer_heap)
+    proactor_factory, ready_queue, timer_heap, run_loop = request.param
+    event_loop = IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue, timer_heap=timer_heap, run_loop=run_loop)
     try:
         yield event_loop
     finally:

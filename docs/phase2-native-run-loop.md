@@ -101,3 +101,47 @@ metric beyond measured noise.
 
 The lightweight review checks tick ordering, timeout arithmetic, GIL/reference
 safety, fairness budgets, version adapters, and failure-state recoverability.
+
+## Implemented design
+
+- ABI version 12 adds `LoopCore.prepare_tick` for native timeout arithmetic
+  and `finish_tick` for bounded due-timer promotion plus an owned ready-list
+  handoff. Partial failures leave promoted work in the ready queue and never
+  discard a timer or callback.
+- `IoUringProactorEventLoop(run_loop="native")` is an experimental opt-in that
+  requires the already-reviewed native ready queue and timer heap. It keeps
+  callback execution, debug timing, exception handling, lifecycle hooks, and
+  the outer one-tick return in Python.
+- The native proactor's private `select_batch` waits through `Ring.wait`, which
+  already releases the GIL only around the kernel wait, resolves at most 256
+  completions, and reports residual CQ work for an immediate follow-up tick.
+  CFFI remains a supported differential selector and uses its existing batch
+  behavior.
+- Initial budgets are 256 CQ completions, 4,096 due timers, and 4,096 ready
+  callbacks. Exhaustion counters and an immediate-next-tick flag prevent any
+  exhausted category from causing a blocking wait. Callback snapshots that
+  survive a `BaseException` remain ahead of newly scheduled work.
+- The default remains the Python `_run_once` path. Contract matrices cover the
+  native tick with native and CFFI proactors while fake-selector tests exercise
+  timeout, stop/snapshot, recursion, and budget behavior without kernel access.
+
+## Measurement interpretation
+
+`benchmarks.run_loop_tick` isolates mixed ready/timer tick preparation and
+handoff against an equivalent Python state model, reporting throughput, CPU,
+variation, RSS, tick count, and both storage-budget exhaustion counts. It does
+so with the configured 4,096-item ready and timer budgets, which are embedded
+in every result for auditability. It does not include callback bodies or claim
+end-to-end loop speed; those remain in the Phase 2 scheduling matrix.
+
+## Captured smoke baseline
+
+`benchmarks/results/phase2-native-tick-2026-08-10-wsl2.json` was captured from
+harness commit `1c7e74e` on Python 3.12.3 / WSL2 with one warmup and five
+measured runs of 4,096 ready plus 4,096 due timer handles. Both models required
+two ticks and recorded the same single ready-budget exhaustion and no timer-
+budget exhaustion. Median state-plumbing throughput was 4.58 million
+handles/second for the native core and 2.96 million for the Python model, with
+48.7% and 14.9% wall variation. The short smoke run is therefore retained as
+auditable functional evidence, not a performance conclusion; it does not show
+an end-to-end event-loop or application improvement.

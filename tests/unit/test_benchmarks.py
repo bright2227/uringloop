@@ -4,6 +4,7 @@ from benchmarks.eventfd_wakeup import BACKENDS as WAKEUP_BACKENDS, WakeupWorkloa
 from benchmarks.phase1 import Workload, matrix, parse_strace_summary, percentile
 from benchmarks.phase2 import SchedulingWorkload, matrix as scheduling_matrix, worker_result
 from benchmarks.ready_queue import ReadyQueueWorkload, backends_for, worker_result as ready_queue_worker_result, workloads
+from benchmarks.run_loop_tick import READY_BUDGET, TIMER_BUDGET, TickWorkload, worker_result as tick_worker_result
 from benchmarks.timer_heap import TimerHeapWorkload, worker_result as timer_heap_worker_result
 from scripts.compat_baseline import adaptation_methods_for_source, summarize, verify_adaptation_coverage
 
@@ -121,6 +122,22 @@ def test_wakeup_worker_reports_idle_latency_and_burst_write_counts():
     assert result["summary"]["idle_latency_p99_us_median"] > 0
     assert result["summary"]["idle_writes_median"] == 4
     assert result["summary"]["burst_writes_median"] >= 1
+
+
+@pytest.mark.parametrize("backend", ["native-core", "python-model"])
+def test_run_loop_tick_worker_reports_fairness_budget_counts(backend):
+    result = tick_worker_result(
+        backend,
+        TickWorkload(READY_BUDGET + 1, TIMER_BUDGET + 1),
+        warmup=0,
+        repeats=2,
+    )
+
+    assert len(result["samples"]) == 2
+    assert result["budgets"] == {"ready": READY_BUDGET, "timers": TIMER_BUDGET}
+    assert result["summary"]["ticks_median"] >= 2
+    assert result["summary"]["ready_budget_exhaustions_median"] > 0
+    assert result["summary"]["timer_budget_exhaustions_median"] > 0
 
 
 def test_strace_summary_extracts_per_syscall_counts(tmp_path):

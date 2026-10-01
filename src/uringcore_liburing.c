@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <liburing.h>
+#include <math.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -66,6 +67,9 @@ struct UringCoreLoopCore {
     Py_ssize_t timer_capacity;
     Py_ssize_t max_timers;
     uint64_t next_timer_sequence;
+    unsigned long long tick_count;
+    unsigned long long ready_budget_exhaustions;
+    unsigned long long timer_budget_exhaustions;
     int python_callback_active;
     int initialized;
     int closed;
@@ -786,6 +790,159 @@ uringcore_loop_core_clear_timers(
 }
 
 static PyObject *
+uringcore_loop_core_prepare_tick(
+    UringCoreLoopCore *self,
+    PyObject *args)
+{
+    double now;
+    double maximum_timeout;
+    double timeout;
+    int immediate;
+
+    if (!PyArg_ParseTuple(
+            args,
+            "ddp:prepare_tick",
+            &now,
+            &maximum_timeout,
+            &immediate)) {
+        return NULL;
+    }
+    if (!isfinite(maximum_timeout) || maximum_timeout < 0.0) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "maximum timeout must be finite and non-negative");
+        return NULL;
+    }
+    if (uringcore_loop_core_require_open(self) < 0 ||
+        uringcore_loop_core_prune_cancelled_roots(self) < 0) {
+        return NULL;
+    }
+    if (immediate || self->ready_count != 0) {
+        return PyFloat_FromDouble(0.0);
+    }
+    if (self->timer_count == 0) {
+        Py_RETURN_NONE;
+    }
+    timeout = self->timers[0].when - now;
+    if (!(timeout > 0.0)) {
+        timeout = 0.0;
+    }
+    if (timeout > maximum_timeout) {
+        timeout = maximum_timeout;
+    }
+    return PyFloat_FromDouble(timeout);
+}
+
+static PyObject *
+uringcore_loop_core_finish_tick(
+    UringCoreLoopCore *self,
+    PyObject *args)
+{
+    double now;
+    double resolution;
+    Py_ssize_t timer_budget;
+    Py_ssize_t ready_budget;
+    PyObject *promote_args = NULL;
+    PyObject *promoted_object = NULL;
+    PyObject *batch_args = NULL;
+    PyObject *batch = NULL;
+    PyObject *result = NULL;
+    PyObject *promoted_count_object = NULL;
+    PyObject *immediate_object;
+    Py_ssize_t promoted;
+    int immediate = 0;
+    int timer_exhausted = 0;
+
+    if (!PyArg_ParseTuple(
+            args,
+            "ddnn:finish_tick",
+            &now,
+            &resolution,
+            &timer_budget,
+            &ready_budget)) {
+        return NULL;
+    }
+    if (!isfinite(resolution) ||
+        resolution < 0.0 ||
+        timer_budget < 1 ||
+        ready_budget < 1) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "resolution must be finite and non-negative and tick budgets must be positive");
+        return NULL;
+    }
+    if (uringcore_loop_core_require_open(self) < 0) {
+        return NULL;
+    }
+    promote_args = Py_BuildValue("(ddn)", now, resolution, timer_budget);
+    if (promote_args == NULL) {
+        goto error;
+    }
+    promoted_object = uringcore_loop_core_promote_due(self, promote_args);
+    Py_CLEAR(promote_args);
+    if (promoted_object == NULL) {
+        goto error;
+    }
+    promoted = PyLong_AsSsize_t(promoted_object);
+    Py_CLEAR(promoted_object);
+    if (promoted < 0 && PyErr_Occurred()) {
+        goto error;
+    }
+    if (uringcore_loop_core_prune_cancelled_roots(self) < 0) {
+        goto error;
+    }
+    if (promoted == timer_budget &&
+        self->timer_count != 0 &&
+        self->timers[0].when < now + resolution) {
+        immediate = 1;
+        timer_exhausted = 1;
+    }
+    result = PyTuple_New(3);
+    if (result == NULL) {
+        goto error;
+    }
+    promoted_count_object = PyLong_FromSsize_t(promoted);
+    if (promoted_count_object == NULL) {
+        goto error;
+    }
+    batch_args = Py_BuildValue("(n)", ready_budget);
+    if (batch_args == NULL) {
+        goto error;
+    }
+    batch = uringcore_loop_core_take_ready_batch(self, batch_args);
+    Py_CLEAR(batch_args);
+    if (batch == NULL) {
+        goto error;
+    }
+    if (self->ready_count != 0) {
+        immediate = 1;
+    }
+    immediate_object = PyBool_FromLong(immediate);
+    PyTuple_SET_ITEM(result, 0, batch);
+    batch = NULL;
+    PyTuple_SET_ITEM(result, 1, immediate_object);
+    PyTuple_SET_ITEM(result, 2, promoted_count_object);
+    promoted_count_object = NULL;
+    if (self->ready_count != 0) {
+        self->ready_budget_exhaustions++;
+    }
+    if (timer_exhausted) {
+        self->timer_budget_exhaustions++;
+    }
+    self->tick_count++;
+    return result;
+
+error:
+    Py_XDECREF(promote_args);
+    Py_XDECREF(promoted_object);
+    Py_XDECREF(batch_args);
+    Py_XDECREF(batch);
+    Py_XDECREF(promoted_count_object);
+    Py_XDECREF(result);
+    return NULL;
+}
+
+static PyObject *
 uringcore_loop_core_close(
     UringCoreLoopCore *self,
     PyObject *Py_UNUSED(ignored))
@@ -847,6 +1004,30 @@ uringcore_loop_core_get_cancelled_timer_count(
 }
 
 static PyObject *
+uringcore_loop_core_get_tick_count(
+    UringCoreLoopCore *self,
+    void *Py_UNUSED(context))
+{
+    return PyLong_FromUnsignedLongLong(self->tick_count);
+}
+
+static PyObject *
+uringcore_loop_core_get_ready_budget_exhaustions(
+    UringCoreLoopCore *self,
+    void *Py_UNUSED(context))
+{
+    return PyLong_FromUnsignedLongLong(self->ready_budget_exhaustions);
+}
+
+static PyObject *
+uringcore_loop_core_get_timer_budget_exhaustions(
+    UringCoreLoopCore *self,
+    void *Py_UNUSED(context))
+{
+    return PyLong_FromUnsignedLongLong(self->timer_budget_exhaustions);
+}
+
+static PyObject *
 uringcore_loop_core_get_closed(
     UringCoreLoopCore *self,
     void *Py_UNUSED(context))
@@ -904,6 +1085,18 @@ static PyMethodDef uringcore_loop_core_methods[] = {
         PyDoc_STR("Release all timer handles while keeping the core open."),
     },
     {
+        "prepare_tick",
+        (PyCFunction)uringcore_loop_core_prepare_tick,
+        METH_VARARGS,
+        PyDoc_STR("Compute the bounded tick wait from ready and timer state."),
+    },
+    {
+        "finish_tick",
+        (PyCFunction)uringcore_loop_core_finish_tick,
+        METH_VARARGS,
+        PyDoc_STR("Promote timers and return one bounded ready snapshot."),
+    },
+    {
         "close",
         (PyCFunction)uringcore_loop_core_close,
         METH_NOARGS,
@@ -932,6 +1125,27 @@ static PyGetSetDef uringcore_loop_core_getset[] = {
         (getter)uringcore_loop_core_get_cancelled_timer_count,
         NULL,
         PyDoc_STR("Number of cancelled timer entries awaiting pruning or compaction."),
+        NULL,
+    },
+    {
+        "tick_count",
+        (getter)uringcore_loop_core_get_tick_count,
+        NULL,
+        PyDoc_STR("Number of completed native scheduling ticks."),
+        NULL,
+    },
+    {
+        "ready_budget_exhaustions",
+        (getter)uringcore_loop_core_get_ready_budget_exhaustions,
+        NULL,
+        PyDoc_STR("Number of ticks that left native ready work pending."),
+        NULL,
+    },
+    {
+        "timer_budget_exhaustions",
+        (getter)uringcore_loop_core_get_timer_budget_exhaustions,
+        NULL,
+        PyDoc_STR("Number of ticks that left already-due timers pending."),
         NULL,
     },
     {
@@ -3876,7 +4090,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 11) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 12) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(

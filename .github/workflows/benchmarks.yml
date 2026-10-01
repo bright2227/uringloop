@@ -88,6 +88,15 @@ jobs:
             --repeats 5 \
             --output "artifacts/phase2-wakeup-${{ matrix.python-version }}-${profile}.json"
 
+      - name: Run bounded native tick comparison
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python -m benchmarks.run_loop_tick \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-tick-${{ matrix.python-version }}-${profile}.json"
+
       - name: Upload raw Phase 1 benchmark results
         uses: actions/upload-artifact@v4
         with:
