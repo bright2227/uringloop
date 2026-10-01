@@ -1,0 +1,229 @@
+{
+  "benchmark": "phase2-native-ready-queue",
+  "environment": {
+    "cpu_count": 8,
+    "executable": "/home/bright2227/uringloop/.venv/bin/python",
+    "git_commit": "7173d9ff6f4f2041e2cdb099f18722d325943b25",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+    "timestamp_utc": "2026-08-09T16:58:28.887123+00:00"
+  },
+  "profile": "smoke",
+  "results": [
+    {
+      "backend": "native-core",
+      "measured_runs": 5,
+      "samples": [
+        {
+          "cpu_seconds": 0.000168,
+          "drain_operations_per_second": 382553469.6927244,
+          "drain_seconds": 1.0707e-05,
+          "enqueue_operations_per_second": 26900292.908462822,
+          "enqueue_seconds": 0.000152266,
+          "wall_seconds": 0.000162973
+        },
+        {
+          "cpu_seconds": 0.0001584,
+          "drain_operations_per_second": 502638360.53503495,
+          "drain_seconds": 8.149e-06,
+          "enqueue_operations_per_second": 28309776.410823513,
+          "enqueue_seconds": 0.000144685,
+          "wall_seconds": 0.000152834
+        },
+        {
+          "cpu_seconds": 0.0001491,
+          "drain_operations_per_second": 496906466.0924421,
+          "drain_seconds": 8.243e-06,
+          "enqueue_operations_per_second": 30464177.07302924,
+          "enqueue_seconds": 0.000134453,
+          "wall_seconds": 0.000142696
+        },
+        {
+          "cpu_seconds": 0.0001422,
+          "drain_operations_per_second": 626491281.7375344,
+          "drain_seconds": 6.538e-06,
+          "enqueue_operations_per_second": 31692729.087518666,
+          "enqueue_seconds": 0.000129241,
+          "wall_seconds": 0.000135779
+        },
+        {
+          "cpu_seconds": 0.0001584,
+          "drain_operations_per_second": 600410436.8220463,
+          "drain_seconds": 6.822e-06,
+          "enqueue_operations_per_second": 28272648.83520276,
+          "enqueue_seconds": 0.000144875,
+          "wall_seconds": 0.000151697
+        }
+      ],
+      "summary": {
+        "cpu_seconds_median": 0.0001584,
+        "drain_operations_per_second_median": 502638360.53503495,
+        "enqueue_operations_per_second_median": 28309776.410823513,
+        "max_rss_kib": 24244,
+        "operations_per_second_median": 27001193.167959813,
+        "wall_seconds_median": 0.000151697,
+        "wall_time_cv_percent": 6.9620130930041855
+      },
+      "warmup_runs": 1,
+      "workload": {
+        "kind": "queue",
+        "operations": 4096
+      }
+    },
+    {
+      "backend": "python-deque",
+      "measured_runs": 5,
+      "samples": [
+        {
+          "cpu_seconds": 0.000187,
+          "drain_operations_per_second": 130205353.1693051,
+          "drain_seconds": 3.1458e-05,
+          "enqueue_operations_per_second": 28016224.23923229,
+          "enqueue_seconds": 0.000146201,
+          "wall_seconds": 0.000177659
+        },
+        {
+          "cpu_seconds": 0.0002575,
+          "drain_operations_per_second": 130209492.32285342,
+          "drain_seconds": 3.1457e-05,
+          "enqueue_operations_per_second": 19187168.581011448,
+          "enqueue_seconds": 0.000213476,
+          "wall_seconds": 0.000244933
+        },
+        {
+          "cpu_seconds": 0.0002103,
+          "drain_operations_per_second": 70062604.76890972,
+          "drain_seconds": 5.8462e-05,
+          "enqueue_operations_per_second": 28704378.538991984,
+          "enqueue_seconds": 0.000142696,
+          "wall_seconds": 0.000201158
+        },
+        {
+          "cpu_seconds": 0.000373,
+          "drain_operations_per_second": 110279467.9877228,
+          "drain_seconds": 3.7142e-05,
+          "enqueue_operations_per_second": 12981620.991179723,
+          "enqueue_seconds": 0.000315523,
+          "wall_seconds": 0.000352665
+        },
+        {
+          "cpu_seconds": 0.0001307,
+          "drain_operations_per_second": 165001611.34386078,
+          "drain_seconds": 2.4824e-05,
+          "enqueue_operations_per_second": 39915802.60388243,
+          "enqueue_seconds": 0.000102616,
+          "wall_seconds": 0.00012744
+        }
+      ],
+      "summary": {
+        "cpu_seconds_median": 0.0002103,
+        "drain_operations_per_second_median": 130205353.1693051,
+        "enqueue_operations_per_second_median": 28016224.23923229,
+        "max_rss_kib": 24096,
+        "operations_per_second_median": 20362103.4211913,
+        "wall_seconds_median": 0.000201158,
+        "wall_time_cv_percent": 38.523954596661454
+      },
+      "warmup_runs": 1,
+      "workload": {
+        "kind": "queue",
+        "operations": 4096
+      }
+    },
+    {
+      "backend": "native-loop",
+      "measured_runs": 5,
+      "samples": [
+        {
+          "cpu_seconds": 0.0072698,
+          "operations_per_second": 594750.3696498421,
+          "wall_seconds": 0.006886923
+        },
+        {
+          "cpu_seconds": 0.0078766,
+          "operations_per_second": 549035.1672037274,
+          "wall_seconds": 0.00746036
+        },
+        {
+          "cpu_seconds": 0.0072886,
+          "operations_per_second": 593354.3730767771,
+          "wall_seconds": 0.006903126
+        },
+        {
+          "cpu_seconds": 0.0078524,
+          "operations_per_second": 551085.9056281531,
+          "wall_seconds": 0.007432598
+        },
+        {
+          "cpu_seconds": 0.0074588,
+          "operations_per_second": 579661.4952351287,
+          "wall_seconds": 0.007066193
+        }
+      ],
+      "summary": {
+        "cpu_seconds_median": 0.0074588,
+        "latency_p50_us": 3640.166,
+        "latency_p99_us": 4021.256,
+        "latency_samples": 20480,
+        "max_rss_kib": 25808,
+        "operations_per_second_median": 579661.4952351287,
+        "wall_seconds_median": 0.007066193,
+        "wall_time_cv_percent": 3.9147022377987737
+      },
+      "warmup_runs": 1,
+      "workload": {
+        "kind": "loop",
+        "operations": 4096
+      }
+    },
+    {
+      "backend": "python-loop",
+      "measured_runs": 5,
+      "samples": [
+        {
+          "cpu_seconds": 0.0071711,
+          "operations_per_second": 602971.5190171564,
+          "wall_seconds": 0.006793024
+        },
+        {
+          "cpu_seconds": 0.0072094,
+          "operations_per_second": 599908.8419767465,
+          "wall_seconds": 0.006827704
+        },
+        {
+          "cpu_seconds": 0.0080182,
+          "operations_per_second": 539281.865093691,
+          "wall_seconds": 0.007595286
+        },
+        {
+          "cpu_seconds": 0.0074326,
+          "operations_per_second": 581822.562016447,
+          "wall_seconds": 0.007039947
+        },
+        {
+          "cpu_seconds": 0.0068019,
+          "operations_per_second": 635792.9382590108,
+          "wall_seconds": 0.006442349
+        }
+      ],
+      "summary": {
+        "cpu_seconds_median": 0.0072094,
+        "latency_p50_us": 3633.06,
+        "latency_p99_us": 4640.459,
+        "latency_samples": 20480,
+        "max_rss_kib": 25872,
+        "operations_per_second_median": 599908.8419767465,
+        "wall_seconds_median": 0.006827704,
+        "wall_time_cv_percent": 6.1189490236854365
+      },
+      "warmup_runs": 1,
+      "workload": {
+        "kind": "loop",
+        "operations": 4096
+      }
+    }
+  ],
+  "schema_version": 1
+}
