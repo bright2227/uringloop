@@ -1,3 +1,5 @@
+import asyncio
+import socket
 import threading
 
 import pytest
@@ -6,9 +8,18 @@ from uringloop.loop import IoUringProactorEventLoop
 from uringloop.proactor import IoUringProactor, _CffiIoUringProactor
 
 
-@pytest.fixture(params=[IoUringProactor, _CffiIoUringProactor], ids=["native", "cffi-oracle"])
+@pytest.fixture(
+    params=[
+        (IoUringProactor, "python"),
+        (IoUringProactor, "native"),
+        (_CffiIoUringProactor, "python"),
+        (_CffiIoUringProactor, "native"),
+    ],
+    ids=["native-python-ready", "native-native-ready", "cffi-python-ready", "cffi-native-ready"],
+)
 def loop(request):
-    event_loop = IoUringProactorEventLoop(request.param())
+    proactor_factory, ready_queue = request.param
+    event_loop = IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue)
     try:
         yield event_loop
     finally:
@@ -75,3 +86,51 @@ def test_callback_exception_context_includes_the_failed_handle(loop):
     assert contexts[0]["handle"] is handle
     assert isinstance(contexts[0]["exception"], RuntimeError)
     assert contexts[0]["message"].startswith("Exception in callback")
+
+
+def test_base_exception_preserves_the_unprocessed_ready_snapshot(loop):
+    called = []
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    loop.call_soon(interrupt)
+    loop.call_soon(called.append, "preserved")
+    with pytest.raises(KeyboardInterrupt):
+        loop.run_forever()
+
+    assert called == []
+    loop.call_soon(loop.stop)
+    loop.run_forever()
+    assert called == ["preserved"]
+
+
+def test_continuously_rescheduled_ready_callback_does_not_starve_io(loop):
+    async def scenario():
+        receiver, sender = socket.socketpair()
+        receiver.setblocking(False)
+        sender.setblocking(False)
+        spinning = True
+        spins = 0
+
+        def spin():
+            nonlocal spins
+            spins += 1
+            if spinning:
+                loop.call_soon(spin)
+
+        loop.call_soon(spin)
+        try:
+            sender.send(b"r")
+            data = await asyncio.wait_for(loop.sock_recv(receiver, 1), timeout=0.5)
+        finally:
+            spinning = False
+            receiver.close()
+            sender.close()
+        await asyncio.sleep(0)
+        return data, spins
+
+    data, spins = loop.run_until_complete(scenario())
+
+    assert data == b"r"
+    assert 1 <= spins < 100

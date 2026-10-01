@@ -88,9 +88,7 @@ class VendoredLiburingBuildExt(build_ext):
         if compiler_command:
             environment.setdefault("CC", compiler_command[0])
         liburing_cflags = environment.get("LIBURING_CFLAGS", "")
-        environment["LIBURING_CFLAGS"] = " ".join(
-            [liburing_cflags, "-fPIC", *instrumentation_flags]
-        ).strip()
+        environment["LIBURING_CFLAGS"] = " ".join([liburing_cflags, "-fPIC", *instrumentation_flags]).strip()
 
         self.announce("configuring vendored liburing", level=2)
         subprocess.run(

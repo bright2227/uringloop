@@ -2,6 +2,7 @@ import pytest
 
 from benchmarks.phase1 import Workload, matrix, parse_strace_summary, percentile
 from benchmarks.phase2 import SchedulingWorkload, matrix as scheduling_matrix, worker_result
+from benchmarks.ready_queue import ReadyQueueWorkload, backends_for, worker_result as ready_queue_worker_result, workloads
 from scripts.compat_baseline import adaptation_methods_for_source, summarize, verify_adaptation_coverage
 
 
@@ -61,6 +62,42 @@ def test_scheduling_worker_reports_ready_and_cancelled_timer_samples():
     assert ready["summary"]["latencies"]["ready"]["samples"] == 16
     assert timers["summary"]["latencies"]["timer"]["samples"] == 8
     assert all(sample["operations_per_second"] > 0 for sample in ready["samples"] + timers["samples"])
+
+
+def test_ready_queue_benchmark_matrix_compares_native_and_python_paths():
+    full = workloads("full")
+
+    assert {item.kind for item in full} == {"queue", "loop"}
+    assert {item.operations for item in full} == {1, 64, 4096, 100_000}
+    assert backends_for(ReadyQueueWorkload("queue", 1)) == ("native-core", "python-deque")
+    assert backends_for(ReadyQueueWorkload("loop", 1)) == ("native-loop", "python-loop")
+
+
+def test_ready_queue_worker_reports_enqueue_and_batch_throughput():
+    result = ready_queue_worker_result(
+        "native-core",
+        ReadyQueueWorkload("queue", 32),
+        warmup=0,
+        repeats=2,
+    )
+
+    assert len(result["samples"]) == 2
+    assert result["summary"]["enqueue_operations_per_second_median"] > 0
+    assert result["summary"]["drain_operations_per_second_median"] > 0
+
+
+@pytest.mark.parametrize("backend", ["native-loop", "python-loop"])
+def test_ready_queue_worker_reports_kernel_independent_loop_dispatch(backend):
+    result = ready_queue_worker_result(
+        backend,
+        ReadyQueueWorkload("loop", 32),
+        warmup=0,
+        repeats=2,
+    )
+
+    assert len(result["samples"]) == 2
+    assert result["summary"]["latency_samples"] == 64
+    assert result["summary"]["operations_per_second_median"] > 0
 
 
 def test_strace_summary_extracts_per_syscall_counts(tmp_path):

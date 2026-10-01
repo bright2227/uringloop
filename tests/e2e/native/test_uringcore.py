@@ -5,6 +5,7 @@ import socket
 import tempfile
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -12,11 +13,112 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 8
+    assert _uringcore.ABI_VERSION == 9
+    assert _uringcore.LoopCore.__module__ == "uringloop._uringcore"
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
     assert _uringcore.ProvidedBuffer.__module__ == "uringloop._uringcore"
+
+
+def test_loop_core_ready_queue_is_fifo_and_bounded_by_snapshot():
+    core = _uringcore.LoopCore()
+    handles = [object() for _ in range(6)]
+    for handle in handles:
+        core.enqueue_ready(handle)
+
+    assert core.ready_count == 6
+    assert core.take_ready_batch(2) == handles[:2]
+    core.enqueue_ready(handles[0])
+    assert core.take_ready_batch(99) == [*handles[2:], handles[0]]
+    assert core.ready_count == 0
+
+
+def test_loop_core_zero_limit_is_safe_for_empty_and_populated_queues():
+    core = _uringcore.LoopCore()
+
+    assert core.take_ready_batch(0) == []
+    handle = object()
+    core.enqueue_ready(handle)
+    assert core.take_ready_batch(0) == []
+    assert core.take_ready_batch(1) == [handle]
+
+
+def test_loop_core_resizes_without_losing_ready_handles():
+    core = _uringcore.LoopCore()
+    handles = [object() for _ in range(10_000)]
+    for handle in handles:
+        core.enqueue_ready(handle)
+
+    assert core.take_ready_batch(len(handles)) == handles
+
+
+def test_loop_core_enqueue_failure_is_atomic():
+    core = _uringcore.LoopCore(max_ready=2)
+    first = object()
+    second = object()
+    core.enqueue_ready(first)
+    core.enqueue_ready(second)
+
+    with pytest.raises(MemoryError):
+        core.enqueue_ready(object())
+
+    assert core.ready_count == 2
+    assert core.take_ready_batch(2) == [first, second]
+
+
+def test_loop_core_clear_and_close_release_owned_references():
+    class Handle:
+        pass
+
+    core = _uringcore.LoopCore()
+    handle = Handle()
+    reference = weakref.ref(handle)
+    core.enqueue_ready(handle)
+    del handle
+    assert reference() is not None
+
+    core.clear_ready()
+    core.clear_ready()
+    assert reference() is None
+    assert core.ready_count == 0
+
+    core.close()
+    core.close()
+    assert core.closed is True
+    with pytest.raises(RuntimeError, match="cannot be reinitialized"):
+        core.__init__()
+    with pytest.raises(RuntimeError, match="loop core is closed"):
+        core.enqueue_ready(object())
+    with pytest.raises(RuntimeError, match="loop core is closed"):
+        core.take_ready_batch(1)
+    with pytest.raises(RuntimeError, match="loop core is closed"):
+        _ = core.ready_count
+
+
+def test_loop_core_ready_handle_cycle_is_visible_to_gc():
+    class Handle:
+        pass
+
+    core = _uringcore.LoopCore()
+    handle = Handle()
+    handle.core = core
+    reference = weakref.ref(handle)
+    core.enqueue_ready(handle)
+
+    del handle
+    del core
+    gc.collect()
+
+    assert reference() is None
+
+
+@pytest.mark.parametrize("limit", [-1, -(2**63)])
+def test_loop_core_rejects_negative_batch_limit(limit):
+    core = _uringcore.LoopCore()
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        core.take_ready_batch(limit)
 
 
 def reap_completions(ring, count):

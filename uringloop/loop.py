@@ -1,4 +1,5 @@
 from asyncio import base_events, events, futures, proactor_events, tasks, unix_events
+from collections import deque
 from collections.abc import Buffer
 import errno
 import io
@@ -8,9 +9,48 @@ import stat
 import threading
 from typing import Any, cast
 
+from uringloop import _uringcore
 from uringloop.lib import POLLERR, POLLHUP, POLLIN
 from uringloop.log import logger
 from uringloop.proactor import IoUringProactor
+
+
+class _NativeReadyQueue:
+    """Deque-compatible adapter backed by the native ready queue.
+
+    ``BaseEventLoop._run_once`` first reads the queue length and then calls
+    ``popleft`` that many times. The first pop snapshots the native queue into
+    one Python batch, so callbacks scheduled while that batch runs remain in
+    the native core until the next tick.
+    """
+
+    __slots__ = ("_batch", "_core")
+
+    def __init__(self):
+        self._core = _uringcore.LoopCore()
+        self._batch = deque()
+
+    def __len__(self):
+        return len(self._batch) + self._core.ready_count
+
+    def append(self, handle):
+        self._core.enqueue_ready(handle)
+
+    def popleft(self):
+        if not self._batch:
+            ready_count = self._core.ready_count
+            if ready_count == 0:
+                raise IndexError("pop from an empty deque")
+            self._batch.extend(self._core.take_ready_batch(ready_count))
+        return self._batch.popleft()
+
+    def clear(self):
+        self._batch.clear()
+        self._core.clear_ready()
+
+    def close(self):
+        self._batch.clear()
+        self._core.close()
 
 
 class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport):  # type: ignore[reportPrivateUsage]
@@ -39,14 +79,27 @@ class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport
 class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
     """Linux version of proactor event loop using IoUring."""
 
-    def __init__(self, proactor: IoUringProactor | None = None):
+    def __init__(self, proactor: IoUringProactor | None = None, *, ready_queue: str = "python"):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
         self._closed = True
+        if ready_queue not in {"python", "native"}:
+            raise ValueError("ready_queue must be 'python' or 'native'")
         if proactor is None:
             proactor = IoUringProactor()
         super().__init__(proactor)
         self._proactor: IoUringProactor
+        self._ready_queue_mode = ready_queue
+        if ready_queue == "native":
+            if self._ready:
+                raise RuntimeError("cannot enable the native ready queue after scheduling callbacks")
+            self._ready = _NativeReadyQueue()
+
+    def close(self):
+        ready = self._ready
+        super().close()
+        if isinstance(ready, _NativeReadyQueue):
+            ready.close()
 
     def _run_forever_setup(self):
         assert self._self_reading_future is None
@@ -210,7 +263,7 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         self, protocol, args, shell, stdin, stdout, stderr, bufsize: int, extra=None, **kwargs
     ):
         waiter = self.create_future()
-        transp = unix_events._UnixSubprocessTransport(   # type: ignore[reportPrivateUsage]
+        transp = unix_events._UnixSubprocessTransport(  # type: ignore[reportPrivateUsage]
             self, protocol, args, shell, stdin, stdout, stderr, bufsize, waiter=waiter, extra=extra, **kwargs
         )
         self._watch_child(cast(int, transp.get_pid()), transp)
@@ -225,7 +278,7 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
 
         return transp
 
-    def _watch_child(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):   # type: ignore[reportPrivateUsage]
+    def _watch_child(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):  # type: ignore[reportPrivateUsage]
         """Reap the child through a pidfd polled by io_uring.
 
         This replaces the child watcher API, which was removed in Python 3.14.

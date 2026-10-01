@@ -9,9 +9,18 @@ from uringloop.loop import IoUringProactorEventLoop
 from uringloop.proactor import IoUringProactor, _CffiIoUringProactor
 
 
-@pytest.fixture(params=[IoUringProactor, _CffiIoUringProactor], ids=["native", "cffi-oracle"])
+@pytest.fixture(
+    params=[
+        (IoUringProactor, "python"),
+        (IoUringProactor, "native"),
+        (_CffiIoUringProactor, "python"),
+        (_CffiIoUringProactor, "native"),
+    ],
+    ids=["native-python-ready", "native-native-ready", "cffi-python-ready", "cffi-native-ready"],
+)
 def loop_factory(request):
-    return lambda: IoUringProactorEventLoop(request.param())
+    proactor_factory, ready_queue = request.param
+    return lambda: IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue)
 
 
 def run(loop_factory, coroutine):

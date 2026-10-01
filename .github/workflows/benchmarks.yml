@@ -61,6 +61,15 @@ jobs:
             --syscalls \
             --output "artifacts/phase2-${{ matrix.python-version }}-${profile}.json"
 
+      - name: Run native ready-queue comparison
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python -m benchmarks.ready_queue \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-ready-${{ matrix.python-version }}-${profile}.json"
+
       - name: Upload raw Phase 1 benchmark results
         uses: actions/upload-artifact@v4
         with:

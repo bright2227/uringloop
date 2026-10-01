@@ -12,6 +12,7 @@ from uringloop.loop import IoUringProactorEventLoop, _IoUringWritePipeTransport 
 async def test_subprocess_basic():
     event_loop = asyncio.get_running_loop()
     assert isinstance(event_loop, IoUringProactorEventLoop)
+
     # Create a protocol class that tracks completion
     class SubprocessProtocol(asyncio.SubprocessProtocol):
         def __init__(self, exit_future: asyncio.Future[Any]):
@@ -40,6 +41,7 @@ async def test_subprocess_basic():
 async def test_subprocess_io():
     event_loop = asyncio.get_running_loop()
     assert isinstance(event_loop, IoUringProactorEventLoop)
+
     class SubprocessProtocol(asyncio.SubprocessProtocol):
         def __init__(self, exit_future: asyncio.Future[Any]):
             self.exit_future = exit_future
@@ -52,9 +54,7 @@ async def test_subprocess_io():
             self.exit_future.set_result(True)
 
     exit_future = event_loop.create_future()
-    transport, protocol = await event_loop.subprocess_exec(
-        lambda: SubprocessProtocol(exit_future), "/bin/cat"
-    )
+    transport, protocol = await event_loop.subprocess_exec(lambda: SubprocessProtocol(exit_future), "/bin/cat")
 
     # Write to stdin and close
     stdin = transport.get_pipe_transport(0)
@@ -73,6 +73,7 @@ async def test_subprocess_io():
 async def test_subprocess_error():
     event_loop = asyncio.get_running_loop()
     assert isinstance(event_loop, IoUringProactorEventLoop)
+
     class SubprocessProtocol(asyncio.SubprocessProtocol):
         def __init__(self, exit_future: asyncio.Future[Any]):
             self.exit_future = exit_future
@@ -81,9 +82,7 @@ async def test_subprocess_error():
             self.exit_future.set_result(True)
 
     exit_future = event_loop.create_future()
-    transport, _ = await event_loop.subprocess_exec(
-        lambda: SubprocessProtocol(exit_future), "/bin/sh", "-c", "exit 42"
-    )
+    transport, _ = await event_loop.subprocess_exec(lambda: SubprocessProtocol(exit_future), "/bin/sh", "-c", "exit 42")
 
     await exit_future
     assert transport.get_returncode() == 42

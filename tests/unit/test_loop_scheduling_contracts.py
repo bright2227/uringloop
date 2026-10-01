@@ -17,9 +17,18 @@ class FakeClock:
         self.value += seconds
 
 
-@pytest.fixture(params=[IoUringProactor, _CffiIoUringProactor], ids=["native", "cffi-oracle"])
+@pytest.fixture(
+    params=[
+        (IoUringProactor, "python"),
+        (IoUringProactor, "native"),
+        (_CffiIoUringProactor, "python"),
+        (_CffiIoUringProactor, "native"),
+    ],
+    ids=["native-python-ready", "native-native-ready", "cffi-python-ready", "cffi-native-ready"],
+)
 def loop(request):
-    event_loop = IoUringProactorEventLoop(request.param())
+    proactor_factory, ready_queue = request.param
+    event_loop = IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue)
     try:
         yield event_loop
     finally:
@@ -47,16 +56,14 @@ def test_equal_deadline_timers_are_all_serviced_in_the_due_tick(loop):
 
 def test_cancellation_during_current_ready_batch_skips_the_peer(loop):
     called = []
-    peer = loop.call_soon(called.append, "cancelled")
+    peer = None
 
     def cancel_peer():
         called.append("canceller")
         peer.cancel()
 
-    # Put the canceller before its peer in the same ready snapshot.
-    loop._ready.rotate(1)
     loop.call_soon(cancel_peer)
-    loop._ready.rotate(-1)
+    peer = loop.call_soon(called.append, "cancelled")
     run_one_tick(loop)
 
     assert called == ["canceller"]

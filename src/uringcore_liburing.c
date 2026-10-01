@@ -43,6 +43,17 @@ typedef struct UringCoreLiburingRing UringCoreLiburingRing;
 typedef struct UringCoreLiburingRequest UringCoreLiburingRequest;
 typedef struct UringCoreLiburingCompletion UringCoreLiburingCompletion;
 typedef struct UringCoreProvidedBuffer UringCoreProvidedBuffer;
+typedef struct UringCoreLoopCore UringCoreLoopCore;
+
+struct UringCoreLoopCore {
+    PyObject_HEAD
+    PyObject **ready;
+    Py_ssize_t ready_count;
+    Py_ssize_t ready_capacity;
+    Py_ssize_t max_ready;
+    int initialized;
+    int closed;
+};
 
 struct UringCoreLiburingRequest {
     PyObject_HEAD
@@ -109,6 +120,334 @@ struct UringCoreLiburingRing {
 static PyTypeObject UringCoreLiburingRequestType;
 static PyTypeObject UringCoreLiburingCompletionType;
 static PyTypeObject UringCoreProvidedBufferType;
+static PyTypeObject UringCoreLoopCoreType;
+
+static void
+uringcore_loop_core_release_ready(UringCoreLoopCore *self)
+{
+    PyObject **ready = self->ready;
+    Py_ssize_t ready_count = self->ready_count;
+    Py_ssize_t index;
+
+    /* Detach storage before running arbitrary Python finalizers. A finalizer
+     * that reaches a still-open core may enqueue without being overwritten by
+     * this clear operation. */
+    self->ready = NULL;
+    self->ready_count = 0;
+    self->ready_capacity = 0;
+    for (index = 0; index < ready_count; index++) {
+        Py_DECREF(ready[index]);
+    }
+    PyMem_Free(ready);
+}
+
+static int
+uringcore_loop_core_require_open(UringCoreLoopCore *self)
+{
+    if (self->closed) {
+        PyErr_SetString(PyExc_RuntimeError, "loop core is closed");
+        return -1;
+    }
+    return 0;
+}
+
+static int
+uringcore_loop_core_reserve(UringCoreLoopCore *self)
+{
+    PyObject **ready;
+    Py_ssize_t capacity;
+
+    if (self->ready_count < self->ready_capacity) {
+        return 0;
+    }
+    if (self->ready_count >= self->max_ready) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    if (self->ready_capacity == 0) {
+        capacity = self->max_ready < 16 ? self->max_ready : 16;
+    }
+    else if (self->ready_capacity > PY_SSIZE_T_MAX / 2) {
+        capacity = self->max_ready;
+    }
+    else {
+        capacity = self->ready_capacity * 2;
+        if (capacity > self->max_ready) {
+            capacity = self->max_ready;
+        }
+    }
+    if (capacity <= self->ready_count ||
+        (size_t)capacity > SIZE_MAX / sizeof(*ready)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    ready = PyMem_Realloc(
+        self->ready,
+        (size_t)capacity * sizeof(*ready));
+    if (ready == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    self->ready = ready;
+    self->ready_capacity = capacity;
+    return 0;
+}
+
+static PyObject *
+uringcore_loop_core_new(
+    PyTypeObject *type,
+    PyObject *Py_UNUSED(args),
+    PyObject *Py_UNUSED(kwargs))
+{
+    UringCoreLoopCore *self = (UringCoreLoopCore *)type->tp_alloc(type, 0);
+
+    if (self != NULL) {
+        self->max_ready = PY_SSIZE_T_MAX;
+    }
+    return (PyObject *)self;
+}
+
+static int
+uringcore_loop_core_init(
+    UringCoreLoopCore *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {"max_ready", NULL};
+    PyObject *max_ready_object = NULL;
+    PyObject *index = NULL;
+    Py_ssize_t max_ready = PY_SSIZE_T_MAX;
+
+    if (self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "loop core cannot be reinitialized");
+        return -1;
+    }
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "|O:LoopCore",
+            keyword_names,
+            &max_ready_object)) {
+        return -1;
+    }
+    if (max_ready_object != NULL && max_ready_object != Py_None) {
+        index = PyNumber_Index(max_ready_object);
+        if (index == NULL) {
+            return -1;
+        }
+        max_ready = PyLong_AsSsize_t(index);
+        Py_DECREF(index);
+        if (max_ready < 1 || PyErr_Occurred()) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_ValueError, "max_ready must be a positive integer");
+            return -1;
+        }
+    }
+    uringcore_loop_core_release_ready(self);
+    self->max_ready = max_ready;
+    self->initialized = 1;
+    self->closed = 0;
+    return 0;
+}
+
+static void
+uringcore_loop_core_dealloc(UringCoreLoopCore *self)
+{
+    PyObject_GC_UnTrack(self);
+    self->closed = 1;
+    uringcore_loop_core_release_ready(self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static int
+uringcore_loop_core_traverse(
+    UringCoreLoopCore *self,
+    visitproc visit,
+    void *arg)
+{
+    Py_ssize_t index;
+
+    for (index = 0; index < self->ready_count; index++) {
+        Py_VISIT(self->ready[index]);
+    }
+    return 0;
+}
+
+static int
+uringcore_loop_core_clear(UringCoreLoopCore *self)
+{
+    uringcore_loop_core_release_ready(self);
+    return 0;
+}
+
+static PyObject *
+uringcore_loop_core_enqueue_ready(
+    UringCoreLoopCore *self,
+    PyObject *handle)
+{
+    if (uringcore_loop_core_require_open(self) < 0 ||
+        uringcore_loop_core_reserve(self) < 0) {
+        return NULL;
+    }
+    Py_INCREF(handle);
+    self->ready[self->ready_count++] = handle;
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+uringcore_loop_core_take_ready_batch(
+    UringCoreLoopCore *self,
+    PyObject *args)
+{
+    Py_ssize_t limit;
+    Py_ssize_t count;
+    Py_ssize_t remaining;
+    Py_ssize_t index;
+    PyObject *batch;
+
+    if (!PyArg_ParseTuple(args, "n:take_ready_batch", &limit)) {
+        return NULL;
+    }
+    if (limit < 0) {
+        PyErr_SetString(PyExc_ValueError, "ready batch limit cannot be negative");
+        return NULL;
+    }
+    if (uringcore_loop_core_require_open(self) < 0) {
+        return NULL;
+    }
+    count = limit < self->ready_count ? limit : self->ready_count;
+    batch = PyList_New(count);
+    if (batch == NULL) {
+        return NULL;
+    }
+    for (index = 0; index < count; index++) {
+        /* Transfer the queue's strong reference into the result list. */
+        PyList_SET_ITEM(batch, index, self->ready[index]);
+    }
+    remaining = self->ready_count - count;
+    if (remaining != 0) {
+        memmove(
+            self->ready,
+            self->ready + count,
+            (size_t)remaining * sizeof(*self->ready));
+    }
+    if (count != 0) {
+        memset(
+            self->ready + remaining,
+            0,
+            (size_t)count * sizeof(*self->ready));
+    }
+    self->ready_count = remaining;
+    return batch;
+}
+
+static PyObject *
+uringcore_loop_core_clear_ready(
+    UringCoreLoopCore *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    uringcore_loop_core_release_ready(self);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+uringcore_loop_core_close(
+    UringCoreLoopCore *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    if (!self->closed) {
+        self->closed = 1;
+        uringcore_loop_core_release_ready(self);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+uringcore_loop_core_get_ready_count(
+    UringCoreLoopCore *self,
+    void *Py_UNUSED(context))
+{
+    if (uringcore_loop_core_require_open(self) < 0) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t(self->ready_count);
+}
+
+static PyObject *
+uringcore_loop_core_get_closed(
+    UringCoreLoopCore *self,
+    void *Py_UNUSED(context))
+{
+    return PyBool_FromLong(self->closed);
+}
+
+static PyMethodDef uringcore_loop_core_methods[] = {
+    {
+        "enqueue_ready",
+        (PyCFunction)uringcore_loop_core_enqueue_ready,
+        METH_O,
+        PyDoc_STR("Append one strongly-owned ready handle."),
+    },
+    {
+        "take_ready_batch",
+        (PyCFunction)uringcore_loop_core_take_ready_batch,
+        METH_VARARGS,
+        PyDoc_STR("Remove and return at most limit ready handles in FIFO order."),
+    },
+    {
+        "clear_ready",
+        (PyCFunction)uringcore_loop_core_clear_ready,
+        METH_NOARGS,
+        PyDoc_STR("Release all queued handles while keeping the core open."),
+    },
+    {
+        "close",
+        (PyCFunction)uringcore_loop_core_close,
+        METH_NOARGS,
+        PyDoc_STR("Idempotently release ready-queue storage and close the core."),
+    },
+    {NULL, NULL, 0, NULL},
+};
+
+static PyGetSetDef uringcore_loop_core_getset[] = {
+    {
+        "ready_count",
+        (getter)uringcore_loop_core_get_ready_count,
+        NULL,
+        PyDoc_STR("Number of strongly-owned ready handles."),
+        NULL,
+    },
+    {
+        "closed",
+        (getter)uringcore_loop_core_get_closed,
+        NULL,
+        PyDoc_STR("Whether this loop core has been closed."),
+        NULL,
+    },
+    {NULL},
+};
+
+PyDoc_STRVAR(
+    uringcore_loop_core_doc,
+    "LoopCore(max_ready=None)\n"
+    "--\n"
+    "\n"
+    "Own a GC-visible FIFO queue of Python ready handles.");
+
+static PyTypeObject UringCoreLoopCoreType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "uringloop._uringcore.LoopCore",
+    .tp_basicsize = sizeof(UringCoreLoopCore),
+    .tp_dealloc = (destructor)uringcore_loop_core_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_doc = uringcore_loop_core_doc,
+    .tp_methods = uringcore_loop_core_methods,
+    .tp_getset = uringcore_loop_core_getset,
+    .tp_init = (initproc)uringcore_loop_core_init,
+    .tp_new = uringcore_loop_core_new,
+    .tp_traverse = (traverseproc)uringcore_loop_core_traverse,
+    .tp_clear = (inquiry)uringcore_loop_core_clear,
+};
 
 static void
 uringcore_liburing_ring_free_buffer_pool(UringCoreLiburingRing *self)
@@ -2664,6 +3003,9 @@ PyInit__uringcore(void)
 {
     PyObject *module;
 
+    if (PyType_Ready(&UringCoreLoopCoreType) < 0) {
+        return NULL;
+    }
     if (PyType_Ready(&UringCoreLiburingRequestType) < 0) {
         return NULL;
     }
@@ -2682,6 +3024,13 @@ PyInit__uringcore(void)
         return NULL;
     }
 
+    if (PyModule_AddObjectRef(
+            module,
+            "LoopCore",
+            (PyObject *)&UringCoreLoopCoreType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
     if (PyModule_AddObjectRef(
             module,
             "Ring",
@@ -2710,7 +3059,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 8) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 9) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(

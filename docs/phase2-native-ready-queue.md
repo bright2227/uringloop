@@ -100,3 +100,43 @@ execution or timer management.
 
 The lightweight review must explicitly check reference ownership, snapshot
 semantics, ABI/stub agreement, and the absence of unrelated Ring changes.
+
+## Implemented design
+
+- `_uringcore.LoopCore` is a separate GC-aware heap type with a failure-atomic
+  growable FIFO, strong-reference traversal, deterministic allocation-failure
+  injection through `max_ready`, idempotent clear/close, and precise
+  use-after-close errors. The native ABI version is 9.
+- `_NativeReadyQueue` adapts `LoopCore` to the private deque operations used by
+  `BaseEventLoop`. Its first `popleft` transfers one bounded tick snapshot into
+  Python; callbacks appended during dispatch remain in the native core for the
+  next tick. An interrupted batch stays ahead of newly queued callbacks.
+- `IoUringProactorEventLoop(ready_queue="native")` is the experimental opt-in.
+  The default remains `ready_queue="python"`, preserving the private deque
+  oracle until the integration branch.
+- Compatibility, fake-clock, and real-loop scheduling contracts run across the
+  native and CFFI proactors with both ready-queue adapters.
+
+## Measurement interpretation
+
+The branch-specific runner compares direct enqueue/batch removal and callback
+dispatch through `BaseEventLoop._run_once` in isolated processes. The callback
+case uses a minimal loop with no proactor so ring setup and completion waits do
+not contaminate a measurement whose only variable is ready-queue storage.
+Initial smoke measurements
+show that native storage can improve direct queue throughput while the Python
+adapter boundary can erase that improvement end to end. This branch therefore
+retains the native path only as an experimental ownership boundary and makes no
+performance claim. A raw result tied to the committed harness is required
+before branch completion.
+
+## Captured smoke baseline
+
+`benchmarks/results/phase2-ready-queue-2026-08-10-wsl2.json` was captured from
+harness commit `7173d9f` on Python 3.12.3 / WSL2 with one warmup and five
+measured runs of 4,096 callbacks. The direct medians were 27.0 million native
+and 20.4 million deque handle lifecycles per second. The `BaseEventLoop`
+dispatch medians were 580 thousand native-adapter and 600 thousand deque
+callbacks per second. The deque direct sample had 38.5% wall-time variation,
+so these smoke figures are provenance data and regression input, not a stable
+performance conclusion.
