@@ -28,6 +28,7 @@ from uringloop.proactor import IoUringProactor, _CffiIoUringProactor
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BACKENDS = ("native-phase2", "native", "cffi-phase2", "cffi", "asyncio", "uvloop")
 SYSCALL_FILTER = "io_uring_enter,epoll_wait,epoll_pwait,sendto,recvfrom,sendmsg,recvmsg,read,write"
 
 
@@ -353,7 +354,7 @@ def environment_metadata() -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
-    parser.add_argument("--backend", choices=("native", "cffi", "asyncio", "uvloop"), default="native")
+    parser.add_argument("--backend", choices=BACKENDS, default="native")
     parser.add_argument("--api", choices=("socket", "streams", "file"), default="socket")
     parser.add_argument("--connections", type=int, default=1)
     parser.add_argument("--message-size", type=int, default=64)
@@ -381,7 +382,7 @@ def main() -> int:
     else:
         results = []
         for workload in matrix(args.profile):
-            for backend in ("native", "cffi", "asyncio", "uvloop"):
+            for backend in BACKENDS:
                 results.append(run_isolated(backend, workload, args.warmup, args.repeats, args.syscalls))
         document = {
             "schema_version": 1,

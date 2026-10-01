@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.eventfd_wakeup import BACKENDS as WAKEUP_BACKENDS, WakeupWorkload, worker_result as wakeup_worker_result
-from benchmarks.phase1 import Workload, matrix, parse_strace_summary, percentile
+from benchmarks.phase1 import BACKENDS as PHASE1_BACKENDS, Workload, matrix, parse_strace_summary, percentile
 from benchmarks.phase2 import BACKENDS as SCHEDULING_BACKENDS, SchedulingWorkload, matrix as scheduling_matrix, worker_result
 from benchmarks.ready_queue import ReadyQueueWorkload, backends_for, worker_result as ready_queue_worker_result, workloads
 from benchmarks.run_loop_tick import READY_BUDGET, TIMER_BUDGET, TickWorkload, worker_result as tick_worker_result
@@ -21,6 +21,17 @@ def test_full_benchmark_matrix_covers_phase_zero_dimensions():
     assert {item.message_size for item in workloads} == {64, 4096, 262144}
     assert {item.api for item in workloads} == {"socket", "streams", "file"}
     assert Workload("socket", 1000, 262144, 5) in workloads
+
+
+def test_phase1_workload_backends_include_integrated_and_oracle_paths():
+    assert PHASE1_BACKENDS == (
+        "native-phase2",
+        "native",
+        "cffi-phase2",
+        "cffi",
+        "asyncio",
+        "uvloop",
+    )
 
 
 def test_benchmark_percentiles_are_reported_in_microseconds():
@@ -191,7 +202,7 @@ def test_captured_phase2_integration_index_is_tied_to_report_harness():
     path = Path(__file__).parents[2] / "benchmarks/results/phase2-integration-2026-08-10-wsl2.json"
     report = json.loads(path.read_text())
 
-    assert report["environment"]["git_commit"] == "3e51e3a1b519d585e66a9267b2d3a27f199dcfa4"
+    assert report["environment"]["git_commit"] == "d3aefdb085a5f4e45dab946d6b03f4ca661fd2bb"
     assert len(report["source_artifacts"]) == len(ARTIFACTS)
     assert all(len(source["sha256"]) == 64 for source in report["source_artifacts"])
     assert report["reviewed_branch_tips"]["phase2-native-handles"] == "a383f76"

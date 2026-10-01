@@ -148,7 +148,7 @@ denied.
 ## Auditable evidence index
 
 `benchmarks/results/phase2-integration-2026-08-10-wsl2.json` was generated
-from report harness commit `3e51e3a`. It records every reviewed predecessor
+from report harness commit `d3aefdb`. It records every reviewed predecessor
 tip, SHA-256 and harness commit for all six raw Phase 2 inputs, the 24-result
 contract baseline with syscall coverage, and derived arithmetic. The index is
 reproducible with:
