@@ -20,7 +20,7 @@ from benchmarks.phase1 import environment_metadata, make_loop, parse_strace_summ
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKENDS = ("native", "cffi", "asyncio", "uvloop")
+BACKENDS = ("native-phase2", "native", "cffi-phase2", "cffi", "asyncio", "uvloop")
 KINDS = (
     "ready",
     "timer_equal",

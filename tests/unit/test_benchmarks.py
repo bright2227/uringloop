@@ -1,12 +1,16 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from benchmarks.eventfd_wakeup import BACKENDS as WAKEUP_BACKENDS, WakeupWorkload, worker_result as wakeup_worker_result
 from benchmarks.phase1 import Workload, matrix, parse_strace_summary, percentile
-from benchmarks.phase2 import SchedulingWorkload, matrix as scheduling_matrix, worker_result
+from benchmarks.phase2 import BACKENDS as SCHEDULING_BACKENDS, SchedulingWorkload, matrix as scheduling_matrix, worker_result
 from benchmarks.ready_queue import ReadyQueueWorkload, backends_for, worker_result as ready_queue_worker_result, workloads
 from benchmarks.run_loop_tick import READY_BUDGET, TIMER_BUDGET, TickWorkload, worker_result as tick_worker_result
 from benchmarks.timer_heap import TimerHeapWorkload, worker_result as timer_heap_worker_result
 from scripts.compat_baseline import adaptation_methods_for_source, summarize, verify_adaptation_coverage
+from scripts.phase2_integration_report import ARTIFACTS, build_report
 
 
 def test_full_benchmark_matrix_covers_phase_zero_dimensions():
@@ -50,6 +54,17 @@ def test_full_scheduling_matrix_covers_phase_two_dimensions():
     assert idle.idle_settle_ns > 0
     assert all(item.lead_ns > 0 and item.spread_ns >= 2_000_000_000 for item in workloads if item.kind == "timer_spread")
     assert SchedulingWorkload("timer_cancel", 100000, cancel_every=2) in workloads
+
+
+def test_scheduling_backends_include_integrated_native_and_retained_oracle_paths():
+    assert SCHEDULING_BACKENDS == (
+        "native-phase2",
+        "native",
+        "cffi-phase2",
+        "cffi",
+        "asyncio",
+        "uvloop",
+    )
 
 
 def test_scheduling_worker_reports_ready_and_cancelled_timer_samples():
@@ -155,6 +170,34 @@ def test_strace_summary_extracts_per_syscall_counts(tmp_path):
     assert parsed["total_calls"] == 20
 
 
+def test_phase2_integration_index_reconciles_committed_artifacts():
+    report = build_report()
+
+    assert len(report["source_artifacts"]) == len(ARTIFACTS)
+    assert report["contract_baseline"] == {
+        "result_count": 24,
+        "backend_count": 4,
+        "workload_count": 6,
+        "results_with_syscalls": 24,
+    }
+    assert report["derived_metrics"]["timer_heap"]["throughput_change_percent"] > 100
+    assert report["derived_metrics"]["ready_queue"]["loop_throughput_change_percent"] < 0
+    assert report["derived_metrics"]["native_handles"]["handle_wall_time_change_percent"] > 0
+    assert report["derived_metrics"]["eventfd"]["comparison_available"] is False
+    assert report["decision"]["default_loop_core"] == "phase1"
+
+
+def test_captured_phase2_integration_index_is_tied_to_report_harness():
+    path = Path(__file__).parents[2] / "benchmarks/results/phase2-integration-2026-08-10-wsl2.json"
+    report = json.loads(path.read_text())
+
+    assert report["environment"]["git_commit"] == "3e51e3a1b519d585e66a9267b2d3a27f199dcfa4"
+    assert len(report["source_artifacts"]) == len(ARTIFACTS)
+    assert all(len(source["sha256"]) == 64 for source in report["source_artifacts"])
+    assert report["reviewed_branch_tips"]["phase2-native-handles"] == "a383f76"
+    assert report["integrated_matrix"]["local_status"] == "not_run"
+
+
 def test_compatibility_baseline_records_skip_reasons(tmp_path):
     report = tmp_path / "compat.xml"
     report.write_text(
@@ -188,9 +231,6 @@ def test_compatibility_provenance_requires_referenced_method():
 
 
 def test_compatibility_manifest_covers_every_local_contract():
-    import json
-    from pathlib import Path
-
     manifest = json.loads((Path(__file__).parents[1] / "compat" / "upstream.json").read_text())
 
     verify_adaptation_coverage(manifest["adaptations"])

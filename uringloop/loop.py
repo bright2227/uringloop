@@ -87,10 +87,29 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         timer_heap: str = "python",
         thread_wakeup: str = "socketpair",
         run_loop: str = "python",
+        loop_core: str | None = None,
     ):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
         self._closed = True
+        component_modes = (ready_queue, timer_heap, thread_wakeup, run_loop)
+        phase1_modes = ("python", "python", "socketpair", "python")
+        phase2_modes = ("native", "native", "eventfd", "native")
+        if loop_core not in {None, "phase1", "phase2"}:
+            raise ValueError("loop_core must be None, 'phase1', or 'phase2'")
+        if loop_core is not None and component_modes != phase1_modes:
+            raise ValueError("loop_core cannot be combined with component-level mode overrides")
+        if loop_core == "phase2":
+            ready_queue, timer_heap, thread_wakeup, run_loop = phase2_modes
+            component_modes = phase2_modes
+        if loop_core is not None:
+            self._loop_core_mode = loop_core
+        elif component_modes == phase1_modes:
+            self._loop_core_mode = "phase1"
+        elif component_modes == phase2_modes:
+            self._loop_core_mode = "phase2"
+        else:
+            self._loop_core_mode = "custom"
         if ready_queue not in {"python", "native"}:
             raise ValueError("ready_queue must be 'python' or 'native'")
         if timer_heap not in {"python", "native"}:

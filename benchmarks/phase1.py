@@ -161,6 +161,10 @@ async def file_workload(workload: Workload, backend: str) -> list[int]:
 
 
 def make_loop(backend: str) -> asyncio.AbstractEventLoop:
+    if backend == "native-phase2":
+        return IoUringProactorEventLoop(IoUringProactor(), loop_core="phase2")
+    if backend == "cffi-phase2":
+        return IoUringProactorEventLoop(_CffiIoUringProactor(), loop_core="phase2")
     if backend == "native":
         return IoUringProactorEventLoop(IoUringProactor())
     if backend == "cffi":

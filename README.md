@@ -138,6 +138,21 @@ asyncio.set_event_loop_policy(IoUringProactorEventLoopPolicy())
 asyncio.run(main())
 ```
 
+The reviewed Phase 2 loop-core stack is available as an explicit experimental
+selector:
+
+```python
+asyncio.run(
+    main(),
+    loop_factory=lambda: IoUringProactorEventLoop(loop_core="phase2"),
+)
+```
+
+The default remains the Phase 1 Python scheduling path while the integrated
+Phase 2 matrix awaits a controlled io_uring-capable runner. `loop_core="phase1"`
+selects that retained oracle explicitly. The selector does not silently fall
+back when io_uring or eventfd setup is unavailable.
+
 ## Contributing
 
 Contributions are welcome! Please open issues or pull requests for any bugs or feature requests.

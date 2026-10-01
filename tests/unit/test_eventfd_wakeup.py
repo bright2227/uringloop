@@ -145,6 +145,47 @@ def test_eventfd_poll_setup_failure_aborts_loop_and_closes_proactor():
     assert proactor.closed is True
 
 
+def test_phase2_loop_core_selector_enables_the_reviewed_component_stack():
+    proactor = ConstructorProactor()
+    loop = IoUringProactorEventLoop(proactor, loop_core="phase2")
+    try:
+        assert loop._loop_core_mode == "phase2"
+        assert loop._ready_queue_mode == "native"
+        assert loop._timer_heap_mode == "native"
+        assert loop._run_loop_mode == "native"
+        assert loop._thread_wakeup_mode == "eventfd"
+        assert loop._timer_core is loop._ready._core
+        assert loop._eventfd_wakeup is not None
+    finally:
+        loop.close()
+
+
+def test_phase1_loop_core_selector_preserves_the_default_oracle():
+    proactor = ConstructorProactor()
+    loop = IoUringProactorEventLoop(proactor, loop_core="phase1")
+    try:
+        assert loop._loop_core_mode == "phase1"
+        assert loop._ready_queue_mode == "python"
+        assert loop._timer_heap_mode == "python"
+        assert loop._run_loop_mode == "python"
+        assert loop._thread_wakeup_mode == "socketpair"
+        assert loop._timer_core is None
+        assert loop._eventfd_wakeup is None
+    finally:
+        loop.close()
+
+
+@pytest.mark.parametrize("loop_core", ["native", "", object()])
+def test_loop_core_selector_rejects_unknown_values(loop_core):
+    with pytest.raises(ValueError, match="loop_core"):
+        IoUringProactorEventLoop(ConstructorProactor(), loop_core=loop_core)
+
+
+def test_loop_core_selector_rejects_ambiguous_component_overrides():
+    with pytest.raises(ValueError, match="component-level"):
+        IoUringProactorEventLoop(ConstructorProactor(), loop_core="phase2", thread_wakeup="eventfd")
+
+
 def test_eventfd_descriptor_setup_failure_aborts_loop_and_closes_proactor(monkeypatch):
     proactor = ConstructorProactor()
 
