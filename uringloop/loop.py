@@ -26,8 +26,8 @@ class _NativeReadyQueue:
 
     __slots__ = ("_batch", "_core")
 
-    def __init__(self):
-        self._core = _uringcore.LoopCore()
+    def __init__(self, core=None):
+        self._core = _uringcore.LoopCore() if core is None else core
         self._batch = deque()
 
     def __len__(self):
@@ -79,21 +79,105 @@ class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport
 class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
     """Linux version of proactor event loop using IoUring."""
 
-    def __init__(self, proactor: IoUringProactor | None = None, *, ready_queue: str = "python"):
+    def __init__(
+        self,
+        proactor: IoUringProactor | None = None,
+        *,
+        ready_queue: str = "python",
+        timer_heap: str = "python",
+    ):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
         self._closed = True
         if ready_queue not in {"python", "native"}:
             raise ValueError("ready_queue must be 'python' or 'native'")
+        if timer_heap not in {"python", "native"}:
+            raise ValueError("timer_heap must be 'python' or 'native'")
+        if timer_heap == "native" and ready_queue != "native":
+            raise ValueError("the native timer heap requires ready_queue='native'")
         if proactor is None:
             proactor = IoUringProactor()
         super().__init__(proactor)
         self._proactor: IoUringProactor
         self._ready_queue_mode = ready_queue
+        self._timer_heap_mode = timer_heap
+        self._timer_core = None
         if ready_queue == "native":
             if self._ready:
                 raise RuntimeError("cannot enable the native ready queue after scheduling callbacks")
-            self._ready = _NativeReadyQueue()
+            core = _uringcore.LoopCore()
+            self._ready = _NativeReadyQueue(core)
+            if timer_heap == "native":
+                self._timer_core = core
+
+    def call_at(self, when, callback, *args, context=None):
+        if self._timer_core is None:
+            return super().call_at(when, callback, *args, context=context)
+        if when is None:
+            raise TypeError("when cannot be None")
+        self._check_closed()
+        if self._debug:
+            self._check_thread()
+            self._check_callback(callback, "call_at")
+        timer = events.TimerHandle(when, callback, args, self, context)
+        if timer._source_traceback:
+            del timer._source_traceback[-1]
+        self._timer_core.schedule_timer(timer, when)
+        timer._scheduled = True
+        return timer
+
+    def _run_once(self):
+        if self._timer_core is None:
+            return super()._run_once()
+
+        core = self._timer_core
+        scheduled_count = core.timer_count
+        if (
+            scheduled_count > base_events._MIN_SCHEDULED_TIMER_HANDLES
+            and self._timer_cancelled_count / scheduled_count > base_events._MIN_CANCELLED_TIMER_HANDLES_FRACTION
+        ):
+            core.compact_timers()
+            self._timer_cancelled_count = 0
+
+        deadline = core.next_deadline()
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+        timeout = None
+        if self._ready or self._stopping:
+            timeout = 0
+        elif deadline is not None:
+            timeout = min(max(0, deadline - self.time()), base_events.MAXIMUM_SELECT_TIMEOUT)
+
+        event_list = self._selector.select(timeout)
+        self._process_events(event_list)
+        event_list = None
+
+        core.promote_due(self.time(), self._clock_resolution, 4096)
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+
+        ready_count = len(self._ready)
+        for _ in range(ready_count):
+            handle = self._ready.popleft()
+            if handle._cancelled:
+                continue
+            if self._debug:
+                try:
+                    self._current_handle = handle
+                    started = self.time()
+                    handle._run()
+                    elapsed = self.time() - started
+                    if elapsed >= self.slow_callback_duration:
+                        logger.warning(
+                            "Executing %s took %.3f seconds",
+                            base_events._format_handle(handle),
+                            elapsed,
+                        )
+                finally:
+                    self._current_handle = None
+            else:
+                handle._run()
+        handle = None
 
     def close(self):
         ready = self._ready

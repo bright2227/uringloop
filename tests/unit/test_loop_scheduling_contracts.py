@@ -19,16 +19,25 @@ class FakeClock:
 
 @pytest.fixture(
     params=[
-        (IoUringProactor, "python"),
-        (IoUringProactor, "native"),
-        (_CffiIoUringProactor, "python"),
-        (_CffiIoUringProactor, "native"),
+        (IoUringProactor, "python", "python"),
+        (IoUringProactor, "native", "python"),
+        (IoUringProactor, "native", "native"),
+        (_CffiIoUringProactor, "python", "python"),
+        (_CffiIoUringProactor, "native", "python"),
+        (_CffiIoUringProactor, "native", "native"),
     ],
-    ids=["native-python-ready", "native-native-ready", "cffi-python-ready", "cffi-native-ready"],
+    ids=[
+        "native-python",
+        "native-native-ready",
+        "native-native-timers",
+        "cffi-python",
+        "cffi-native-ready",
+        "cffi-native-timers",
+    ],
 )
 def loop(request):
-    proactor_factory, ready_queue = request.param
-    event_loop = IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue)
+    proactor_factory, ready_queue, timer_heap = request.param
+    event_loop = IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue, timer_heap=timer_heap)
     try:
         yield event_loop
     finally:
@@ -80,6 +89,8 @@ def test_cancelled_timer_heap_is_compacted_without_advancing_clock(loop):
 
     assert not loop._scheduled
     assert loop._timer_cancelled_count == 0
+    if loop._timer_heap_mode == "native":
+        assert loop._timer_core.timer_count == 0
 
 
 def test_clock_resolution_admits_near_due_timer(loop):

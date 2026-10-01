@@ -11,16 +11,25 @@ from uringloop.proactor import IoUringProactor, _CffiIoUringProactor
 
 @pytest.fixture(
     params=[
-        (IoUringProactor, "python"),
-        (IoUringProactor, "native"),
-        (_CffiIoUringProactor, "python"),
-        (_CffiIoUringProactor, "native"),
+        (IoUringProactor, "python", "python"),
+        (IoUringProactor, "native", "python"),
+        (IoUringProactor, "native", "native"),
+        (_CffiIoUringProactor, "python", "python"),
+        (_CffiIoUringProactor, "native", "python"),
+        (_CffiIoUringProactor, "native", "native"),
     ],
-    ids=["native-python-ready", "native-native-ready", "cffi-python-ready", "cffi-native-ready"],
+    ids=[
+        "native-python",
+        "native-native-ready",
+        "native-native-timers",
+        "cffi-python",
+        "cffi-native-ready",
+        "cffi-native-timers",
+    ],
 )
 def loop_factory(request):
-    proactor_factory, ready_queue = request.param
-    return lambda: IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue)
+    proactor_factory, ready_queue, timer_heap = request.param
+    return lambda: IoUringProactorEventLoop(proactor_factory(), ready_queue=ready_queue, timer_heap=timer_heap)
 
 
 def run(loop_factory, coroutine):

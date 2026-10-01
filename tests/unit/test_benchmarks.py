@@ -3,6 +3,7 @@ import pytest
 from benchmarks.phase1 import Workload, matrix, parse_strace_summary, percentile
 from benchmarks.phase2 import SchedulingWorkload, matrix as scheduling_matrix, worker_result
 from benchmarks.ready_queue import ReadyQueueWorkload, backends_for, worker_result as ready_queue_worker_result, workloads
+from benchmarks.timer_heap import TimerHeapWorkload, worker_result as timer_heap_worker_result
 from scripts.compat_baseline import adaptation_methods_for_source, summarize, verify_adaptation_coverage
 
 
@@ -97,6 +98,17 @@ def test_ready_queue_worker_reports_kernel_independent_loop_dispatch(backend):
 
     assert len(result["samples"]) == 2
     assert result["summary"]["latency_samples"] == 64
+    assert result["summary"]["operations_per_second_median"] > 0
+
+
+@pytest.mark.parametrize("backend", ["native-core", "python-heap"])
+def test_timer_heap_worker_reports_insert_cancel_and_expiry_phases(backend):
+    result = timer_heap_worker_result(backend, TimerHeapWorkload(32), warmup=0, repeats=2)
+
+    assert len(result["samples"]) == 2
+    assert result["summary"]["insert_seconds_median"] >= 0
+    assert result["summary"]["cancel_seconds_median"] >= 0
+    assert result["summary"]["expire_seconds_median"] >= 0
     assert result["summary"]["operations_per_second_median"] > 0
 
 

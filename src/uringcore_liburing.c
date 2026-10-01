@@ -45,12 +45,24 @@ typedef struct UringCoreLiburingCompletion UringCoreLiburingCompletion;
 typedef struct UringCoreProvidedBuffer UringCoreProvidedBuffer;
 typedef struct UringCoreLoopCore UringCoreLoopCore;
 
+typedef struct {
+    PyObject *handle;
+    double when;
+    uint64_t sequence;
+} UringCoreTimerEntry;
+
 struct UringCoreLoopCore {
     PyObject_HEAD
     PyObject **ready;
     Py_ssize_t ready_count;
     Py_ssize_t ready_capacity;
     Py_ssize_t max_ready;
+    UringCoreTimerEntry *timers;
+    Py_ssize_t timer_count;
+    Py_ssize_t timer_capacity;
+    Py_ssize_t max_timers;
+    uint64_t next_timer_sequence;
+    int python_callback_active;
     int initialized;
     int closed;
 };
@@ -141,9 +153,40 @@ uringcore_loop_core_release_ready(UringCoreLoopCore *self)
     PyMem_Free(ready);
 }
 
+static void
+uringcore_loop_core_release_timers(UringCoreLoopCore *self)
+{
+    UringCoreTimerEntry *timers = self->timers;
+    Py_ssize_t timer_count = self->timer_count;
+    Py_ssize_t index;
+
+    self->timers = NULL;
+    self->timer_count = 0;
+    self->timer_capacity = 0;
+    for (index = 0; index < timer_count; index++) {
+        Py_DECREF(timers[index].handle);
+    }
+    PyMem_Free(timers);
+}
+
+static int
+uringcore_loop_core_require_idle(UringCoreLoopCore *self)
+{
+    if (self->python_callback_active) {
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "loop core cannot be mutated during timer handle access");
+        return -1;
+    }
+    return 0;
+}
+
 static int
 uringcore_loop_core_require_open(UringCoreLoopCore *self)
 {
+    if (uringcore_loop_core_require_idle(self) < 0) {
+        return -1;
+    }
     if (self->closed) {
         PyErr_SetString(PyExc_RuntimeError, "loop core is closed");
         return -1;
@@ -193,6 +236,133 @@ uringcore_loop_core_reserve(UringCoreLoopCore *self)
     return 0;
 }
 
+static int
+uringcore_timer_less(
+    const UringCoreTimerEntry *left,
+    const UringCoreTimerEntry *right)
+{
+    if (left->when < right->when) {
+        return 1;
+    }
+    if (left->when == right->when) {
+        return left->sequence < right->sequence;
+    }
+    return 0;
+}
+
+static int
+uringcore_loop_core_reserve_timers(UringCoreLoopCore *self)
+{
+    UringCoreTimerEntry *timers;
+    Py_ssize_t capacity;
+
+    if (self->timer_count < self->timer_capacity) {
+        return 0;
+    }
+    if (self->timer_count >= self->max_timers) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    if (self->timer_capacity == 0) {
+        capacity = self->max_timers < 16 ? self->max_timers : 16;
+    }
+    else if (self->timer_capacity > PY_SSIZE_T_MAX / 2) {
+        capacity = self->max_timers;
+    }
+    else {
+        capacity = self->timer_capacity * 2;
+        if (capacity > self->max_timers) {
+            capacity = self->max_timers;
+        }
+    }
+    if (capacity <= self->timer_count ||
+        (size_t)capacity > SIZE_MAX / sizeof(*timers)) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    timers = PyMem_Realloc(
+        self->timers,
+        (size_t)capacity * sizeof(*timers));
+    if (timers == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    self->timers = timers;
+    self->timer_capacity = capacity;
+    return 0;
+}
+
+static void
+uringcore_loop_core_sift_down(
+    UringCoreLoopCore *self,
+    Py_ssize_t root)
+{
+    UringCoreTimerEntry entry = self->timers[root];
+    Py_ssize_t child;
+    Py_ssize_t right;
+
+    while ((child = root * 2 + 1) < self->timer_count) {
+        right = child + 1;
+        if (right < self->timer_count &&
+            uringcore_timer_less(&self->timers[right], &self->timers[child])) {
+            child = right;
+        }
+        if (!uringcore_timer_less(&self->timers[child], &entry)) {
+            break;
+        }
+        self->timers[root] = self->timers[child];
+        root = child;
+    }
+    self->timers[root] = entry;
+}
+
+static UringCoreTimerEntry
+uringcore_loop_core_pop_timer(UringCoreLoopCore *self)
+{
+    UringCoreTimerEntry removed = self->timers[0];
+    UringCoreTimerEntry last = self->timers[self->timer_count - 1];
+
+    self->timer_count--;
+    if (self->timer_count != 0) {
+        self->timers[0] = last;
+        uringcore_loop_core_sift_down(self, 0);
+    }
+    return removed;
+}
+
+static int
+uringcore_loop_core_handle_cancelled(
+    UringCoreLoopCore *self,
+    PyObject *handle)
+{
+    PyObject *cancelled;
+    int result;
+
+    self->python_callback_active = 1;
+    cancelled = PyObject_GetAttrString(handle, "_cancelled");
+    if (cancelled == NULL) {
+        self->python_callback_active = 0;
+        return -1;
+    }
+    result = PyObject_IsTrue(cancelled);
+    Py_DECREF(cancelled);
+    self->python_callback_active = 0;
+    return result;
+}
+
+static int
+uringcore_loop_core_mark_timer_unscheduled(
+    UringCoreLoopCore *self,
+    PyObject *handle)
+{
+    int result;
+
+    self->python_callback_active = 1;
+    result = PyObject_SetAttrString(handle, "_scheduled", Py_False);
+    self->python_callback_active = 0;
+    return result;
+}
+
 static PyObject *
 uringcore_loop_core_new(
     PyTypeObject *type,
@@ -203,6 +373,7 @@ uringcore_loop_core_new(
 
     if (self != NULL) {
         self->max_ready = PY_SSIZE_T_MAX;
+        self->max_timers = PY_SSIZE_T_MAX;
     }
     return (PyObject *)self;
 }
@@ -213,10 +384,12 @@ uringcore_loop_core_init(
     PyObject *args,
     PyObject *kwargs)
 {
-    static char *keyword_names[] = {"max_ready", NULL};
+    static char *keyword_names[] = {"max_ready", "max_timers", NULL};
     PyObject *max_ready_object = NULL;
+    PyObject *max_timers_object = NULL;
     PyObject *index = NULL;
     Py_ssize_t max_ready = PY_SSIZE_T_MAX;
+    Py_ssize_t max_timers = PY_SSIZE_T_MAX;
 
     if (self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "loop core cannot be reinitialized");
@@ -225,9 +398,10 @@ uringcore_loop_core_init(
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
-            "|O:LoopCore",
+            "|OO:LoopCore",
             keyword_names,
-            &max_ready_object)) {
+            &max_ready_object,
+            &max_timers_object)) {
         return -1;
     }
     if (max_ready_object != NULL && max_ready_object != Py_None) {
@@ -243,8 +417,24 @@ uringcore_loop_core_init(
             return -1;
         }
     }
+    if (max_timers_object != NULL && max_timers_object != Py_None) {
+        index = PyNumber_Index(max_timers_object);
+        if (index == NULL) {
+            return -1;
+        }
+        max_timers = PyLong_AsSsize_t(index);
+        Py_DECREF(index);
+        if (max_timers < 1 || PyErr_Occurred()) {
+            PyErr_Clear();
+            PyErr_SetString(PyExc_ValueError, "max_timers must be a positive integer");
+            return -1;
+        }
+    }
     uringcore_loop_core_release_ready(self);
+    uringcore_loop_core_release_timers(self);
     self->max_ready = max_ready;
+    self->max_timers = max_timers;
+    self->next_timer_sequence = 0;
     self->initialized = 1;
     self->closed = 0;
     return 0;
@@ -256,6 +446,7 @@ uringcore_loop_core_dealloc(UringCoreLoopCore *self)
     PyObject_GC_UnTrack(self);
     self->closed = 1;
     uringcore_loop_core_release_ready(self);
+    uringcore_loop_core_release_timers(self);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -270,13 +461,20 @@ uringcore_loop_core_traverse(
     for (index = 0; index < self->ready_count; index++) {
         Py_VISIT(self->ready[index]);
     }
+    for (index = 0; index < self->timer_count; index++) {
+        Py_VISIT(self->timers[index].handle);
+    }
     return 0;
 }
 
 static int
 uringcore_loop_core_clear(UringCoreLoopCore *self)
 {
+    if (self->python_callback_active) {
+        return 0;
+    }
     uringcore_loop_core_release_ready(self);
+    uringcore_loop_core_release_timers(self);
     return 0;
 }
 
@@ -346,7 +544,229 @@ uringcore_loop_core_clear_ready(
     UringCoreLoopCore *self,
     PyObject *Py_UNUSED(ignored))
 {
+    if (uringcore_loop_core_require_idle(self) < 0) {
+        return NULL;
+    }
     uringcore_loop_core_release_ready(self);
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+uringcore_loop_core_schedule_timer(
+    UringCoreLoopCore *self,
+    PyObject *args)
+{
+    PyObject *handle;
+    double when;
+    Py_ssize_t index;
+    Py_ssize_t parent;
+    UringCoreTimerEntry entry;
+
+    if (!PyArg_ParseTuple(args, "Od:schedule_timer", &handle, &when)) {
+        return NULL;
+    }
+    if (uringcore_loop_core_require_open(self) < 0 ||
+        uringcore_loop_core_reserve_timers(self) < 0) {
+        return NULL;
+    }
+    if (self->next_timer_sequence == UINT64_MAX) {
+        PyErr_SetString(PyExc_OverflowError, "timer sequence is exhausted");
+        return NULL;
+    }
+    Py_INCREF(handle);
+    entry.handle = handle;
+    entry.when = when;
+    entry.sequence = self->next_timer_sequence++;
+    index = self->timer_count++;
+    while (index != 0) {
+        parent = (index - 1) / 2;
+        if (!uringcore_timer_less(&entry, &self->timers[parent])) {
+            break;
+        }
+        self->timers[index] = self->timers[parent];
+        index = parent;
+    }
+    self->timers[index] = entry;
+    Py_RETURN_NONE;
+}
+
+static int
+uringcore_loop_core_prune_cancelled_roots(UringCoreLoopCore *self)
+{
+    while (self->timer_count != 0) {
+        UringCoreTimerEntry removed;
+        int cancelled = uringcore_loop_core_handle_cancelled(
+            self,
+            self->timers[0].handle);
+        if (cancelled < 0) {
+            return -1;
+        }
+        if (!cancelled) {
+            return 0;
+        }
+        if (uringcore_loop_core_mark_timer_unscheduled(
+                self,
+                self->timers[0].handle) < 0) {
+            return -1;
+        }
+        removed = uringcore_loop_core_pop_timer(self);
+        Py_DECREF(removed.handle);
+    }
+    return 0;
+}
+
+static PyObject *
+uringcore_loop_core_next_deadline(
+    UringCoreLoopCore *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    if (uringcore_loop_core_require_open(self) < 0 ||
+        uringcore_loop_core_prune_cancelled_roots(self) < 0) {
+        return NULL;
+    }
+    if (self->timer_count == 0) {
+        Py_RETURN_NONE;
+    }
+    return PyFloat_FromDouble(self->timers[0].when);
+}
+
+static PyObject *
+uringcore_loop_core_promote_due(
+    UringCoreLoopCore *self,
+    PyObject *args)
+{
+    double now;
+    double resolution;
+    double end_time;
+    Py_ssize_t limit;
+    Py_ssize_t promoted = 0;
+
+    if (!PyArg_ParseTuple(args, "ddn:promote_due", &now, &resolution, &limit)) {
+        return NULL;
+    }
+    if (resolution < 0.0) {
+        PyErr_SetString(PyExc_ValueError, "clock resolution cannot be negative");
+        return NULL;
+    }
+    if (limit < 0) {
+        PyErr_SetString(PyExc_ValueError, "timer promotion limit cannot be negative");
+        return NULL;
+    }
+    if (uringcore_loop_core_require_open(self) < 0) {
+        return NULL;
+    }
+    end_time = now + resolution;
+    while (promoted < limit) {
+        UringCoreTimerEntry removed;
+        if (uringcore_loop_core_prune_cancelled_roots(self) < 0) {
+            return NULL;
+        }
+        if (self->timer_count == 0 ||
+            self->timers[0].when >= end_time) {
+            break;
+        }
+        if (uringcore_loop_core_reserve(self) < 0) {
+            return NULL;
+        }
+        if (uringcore_loop_core_mark_timer_unscheduled(
+                self,
+                self->timers[0].handle) < 0) {
+            return NULL;
+        }
+        removed = uringcore_loop_core_pop_timer(self);
+        self->ready[self->ready_count++] = removed.handle;
+        promoted++;
+    }
+    return PyLong_FromSsize_t(promoted);
+}
+
+static PyObject *
+uringcore_loop_core_compact_timers(
+    UringCoreLoopCore *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    UringCoreTimerEntry *old_timers;
+    UringCoreTimerEntry *new_timers = NULL;
+    unsigned char *cancelled;
+    Py_ssize_t old_count;
+    Py_ssize_t live_count = 0;
+    Py_ssize_t index;
+
+    if (uringcore_loop_core_require_open(self) < 0) {
+        return NULL;
+    }
+    old_count = self->timer_count;
+    if (old_count == 0) {
+        return PyLong_FromLong(0);
+    }
+    cancelled = PyMem_Calloc((size_t)old_count, sizeof(*cancelled));
+    if (cancelled == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    for (index = 0; index < old_count; index++) {
+        int is_cancelled = uringcore_loop_core_handle_cancelled(
+            self,
+            self->timers[index].handle);
+        if (is_cancelled < 0) {
+            PyMem_Free(cancelled);
+            return NULL;
+        }
+        cancelled[index] = (unsigned char)is_cancelled;
+        if (!is_cancelled) {
+            live_count++;
+        }
+    }
+    if (live_count != 0) {
+        new_timers = PyMem_Malloc(
+            (size_t)live_count * sizeof(*new_timers));
+        if (new_timers == NULL) {
+            PyMem_Free(cancelled);
+            PyErr_NoMemory();
+            return NULL;
+        }
+    }
+    for (index = 0; index < old_count; index++) {
+        if (cancelled[index] && uringcore_loop_core_mark_timer_unscheduled(
+                self,
+                self->timers[index].handle) < 0) {
+            PyMem_Free(new_timers);
+            PyMem_Free(cancelled);
+            return NULL;
+        }
+    }
+    old_timers = self->timers;
+    live_count = 0;
+    for (index = 0; index < old_count; index++) {
+        if (!cancelled[index]) {
+            new_timers[live_count++] = old_timers[index];
+        }
+    }
+    self->timers = new_timers;
+    self->timer_count = live_count;
+    self->timer_capacity = live_count;
+    for (index = live_count / 2; index > 0; index--) {
+        uringcore_loop_core_sift_down(self, index - 1);
+    }
+    for (index = 0; index < old_count; index++) {
+        if (cancelled[index]) {
+            Py_DECREF(old_timers[index].handle);
+        }
+    }
+    PyMem_Free(old_timers);
+    PyMem_Free(cancelled);
+    return PyLong_FromSsize_t(old_count - live_count);
+}
+
+static PyObject *
+uringcore_loop_core_clear_timers(
+    UringCoreLoopCore *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    if (uringcore_loop_core_require_idle(self) < 0) {
+        return NULL;
+    }
+    uringcore_loop_core_release_timers(self);
     Py_RETURN_NONE;
 }
 
@@ -355,9 +775,13 @@ uringcore_loop_core_close(
     UringCoreLoopCore *self,
     PyObject *Py_UNUSED(ignored))
 {
+    if (uringcore_loop_core_require_idle(self) < 0) {
+        return NULL;
+    }
     if (!self->closed) {
         self->closed = 1;
         uringcore_loop_core_release_ready(self);
+        uringcore_loop_core_release_timers(self);
     }
     Py_RETURN_NONE;
 }
@@ -371,6 +795,40 @@ uringcore_loop_core_get_ready_count(
         return NULL;
     }
     return PyLong_FromSsize_t(self->ready_count);
+}
+
+static PyObject *
+uringcore_loop_core_get_timer_count(
+    UringCoreLoopCore *self,
+    void *Py_UNUSED(context))
+{
+    if (uringcore_loop_core_require_open(self) < 0) {
+        return NULL;
+    }
+    return PyLong_FromSsize_t(self->timer_count);
+}
+
+static PyObject *
+uringcore_loop_core_get_cancelled_timer_count(
+    UringCoreLoopCore *self,
+    void *Py_UNUSED(context))
+{
+    Py_ssize_t cancelled = 0;
+    Py_ssize_t index;
+
+    if (uringcore_loop_core_require_open(self) < 0) {
+        return NULL;
+    }
+    for (index = 0; index < self->timer_count; index++) {
+        int is_cancelled = uringcore_loop_core_handle_cancelled(
+            self,
+            self->timers[index].handle);
+        if (is_cancelled < 0) {
+            return NULL;
+        }
+        cancelled += is_cancelled;
+    }
+    return PyLong_FromSsize_t(cancelled);
 }
 
 static PyObject *
@@ -401,6 +859,36 @@ static PyMethodDef uringcore_loop_core_methods[] = {
         PyDoc_STR("Release all queued handles while keeping the core open."),
     },
     {
+        "schedule_timer",
+        (PyCFunction)uringcore_loop_core_schedule_timer,
+        METH_VARARGS,
+        PyDoc_STR("Schedule one strongly-owned handle at a monotonic deadline."),
+    },
+    {
+        "next_deadline",
+        (PyCFunction)uringcore_loop_core_next_deadline,
+        METH_NOARGS,
+        PyDoc_STR("Return the next live deadline after pruning cancelled roots."),
+    },
+    {
+        "promote_due",
+        (PyCFunction)uringcore_loop_core_promote_due,
+        METH_VARARGS,
+        PyDoc_STR("Move a bounded number of due timers to the ready queue."),
+    },
+    {
+        "compact_timers",
+        (PyCFunction)uringcore_loop_core_compact_timers,
+        METH_NOARGS,
+        PyDoc_STR("Release cancelled timers and rebuild the native heap."),
+    },
+    {
+        "clear_timers",
+        (PyCFunction)uringcore_loop_core_clear_timers,
+        METH_NOARGS,
+        PyDoc_STR("Release all timer handles while keeping the core open."),
+    },
+    {
         "close",
         (PyCFunction)uringcore_loop_core_close,
         METH_NOARGS,
@@ -418,6 +906,20 @@ static PyGetSetDef uringcore_loop_core_getset[] = {
         NULL,
     },
     {
+        "timer_count",
+        (getter)uringcore_loop_core_get_timer_count,
+        NULL,
+        PyDoc_STR("Number of strongly-owned timer entries, including cancelled entries."),
+        NULL,
+    },
+    {
+        "cancelled_timer_count",
+        (getter)uringcore_loop_core_get_cancelled_timer_count,
+        NULL,
+        PyDoc_STR("Number of cancelled timer entries awaiting pruning or compaction."),
+        NULL,
+    },
+    {
         "closed",
         (getter)uringcore_loop_core_get_closed,
         NULL,
@@ -429,10 +931,10 @@ static PyGetSetDef uringcore_loop_core_getset[] = {
 
 PyDoc_STRVAR(
     uringcore_loop_core_doc,
-    "LoopCore(max_ready=None)\n"
+    "LoopCore(max_ready=None, max_timers=None)\n"
     "--\n"
     "\n"
-    "Own a GC-visible FIFO queue of Python ready handles.");
+    "Own GC-visible ready-queue and timer-heap state.");
 
 static PyTypeObject UringCoreLoopCoreType = {
     PyVarObject_HEAD_INIT(NULL, 0)
@@ -3059,7 +3561,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 9) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 10) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(

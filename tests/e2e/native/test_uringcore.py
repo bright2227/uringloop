@@ -1,7 +1,10 @@
 import errno
 import gc
+import random
 import select
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -13,7 +16,7 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 9
+    assert _uringcore.ABI_VERSION == 10
     assert _uringcore.LoopCore.__module__ == "uringloop._uringcore"
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
@@ -119,6 +122,190 @@ def test_loop_core_rejects_negative_batch_limit(limit):
 
     with pytest.raises(ValueError, match="cannot be negative"):
         core.take_ready_batch(limit)
+
+
+class Timer:
+    def __init__(self, name):
+        self.name = name
+        self._cancelled = False
+        self._scheduled = True
+
+    def cancel(self):
+        self._cancelled = True
+
+
+def test_loop_core_timer_heap_orders_deadlines_and_promotes_a_bounded_batch():
+    core = _uringcore.LoopCore()
+    later = Timer("later")
+    first = Timer("first")
+    equal = Timer("equal")
+    core.schedule_timer(later, 12.0)
+    core.schedule_timer(first, 10.0)
+    core.schedule_timer(equal, 10.0)
+
+    assert core.timer_count == 3
+    assert core.next_deadline() == 10.0
+    assert core.promote_due(10.0, 0.5, 1) == 1
+    assert core.take_ready_batch(10) == [first]
+    assert first._scheduled is False
+    assert core.next_deadline() == 10.0
+    assert core.promote_due(10.0, 0.5, 10) == 1
+    assert core.take_ready_batch(10) == [equal]
+    assert core.next_deadline() == 12.0
+
+
+def test_loop_core_timer_cancellation_prunes_roots_and_compacts_storms():
+    core = _uringcore.LoopCore()
+    timers = [Timer(index) for index in range(200)]
+    for index, timer in enumerate(timers):
+        core.schedule_timer(timer, float(index))
+        if index != 199:
+            timer.cancel()
+
+    assert core.cancelled_timer_count == 199
+    assert core.next_deadline() == 199.0
+    assert core.timer_count == 1
+
+    extra = [Timer(index) for index in range(20)]
+    for index, timer in enumerate(extra):
+        core.schedule_timer(timer, 300.0 + index)
+        if index % 2 == 0:
+            timer.cancel()
+    assert core.compact_timers() == 10
+    assert core.cancelled_timer_count == 0
+    assert core.timer_count == 11
+
+
+def test_loop_core_timer_schedule_failure_is_atomic():
+    core = _uringcore.LoopCore(max_timers=1)
+    retained = Timer("retained")
+    rejected = Timer("rejected")
+    core.schedule_timer(retained, 2.0)
+
+    with pytest.raises(MemoryError):
+        core.schedule_timer(rejected, 1.0)
+
+    assert core.timer_count == 1
+    assert core.next_deadline() == 2.0
+
+
+def test_loop_core_timer_heap_matches_reference_model_under_randomized_operations():
+    generator = random.Random(20260810)
+    core = _uringcore.LoopCore()
+    entries = []
+    for sequence in range(500):
+        timer = Timer(sequence)
+        when = float(generator.randrange(100))
+        core.schedule_timer(timer, when)
+        if generator.randrange(4) == 0:
+            timer.cancel()
+        entries.append((when, sequence, timer))
+
+    core.compact_timers()
+    promoted = []
+    for now in range(101):
+        while core.next_deadline() is not None and core.next_deadline() < now + 0.1:
+            core.promote_due(float(now), 0.1, 7)
+            promoted.extend(core.take_ready_batch(7))
+
+    expected = [timer for when, sequence, timer in sorted(entries) if not timer._cancelled]
+    assert promoted == expected
+    assert core.timer_count == 0
+
+
+def test_loop_core_timer_python_attribute_reentrancy_cannot_invalidate_native_storage():
+    script = r"""
+from uringloop import _uringcore
+
+class ReentrantCancelled:
+    def __init__(self, core, cancelled):
+        object.__setattr__(self, "core", core)
+        object.__setattr__(self, "cancelled", cancelled)
+        object.__setattr__(self, "_scheduled", True)
+
+    def __getattribute__(self, name):
+        if name == "_cancelled":
+            core = object.__getattribute__(self, "core")
+            for mutation in (core.clear_ready, core.clear_timers, core.close):
+                try:
+                    mutation()
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError("reentrant mutation was not rejected")
+            return object.__getattribute__(self, "cancelled")
+        return object.__getattribute__(self, name)
+
+class ReentrantScheduled(ReentrantCancelled):
+    def __setattr__(self, name, value):
+        if name == "_scheduled":
+            core = object.__getattribute__(self, "core")
+            try:
+                core.clear_timers()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("reentrant timer clear was not rejected")
+        object.__setattr__(self, name, value)
+
+core = _uringcore.LoopCore()
+cancelled = ReentrantCancelled(core, True)
+core.schedule_timer(cancelled, 1.0)
+assert core.next_deadline() is None
+live = ReentrantScheduled(core, False)
+core.schedule_timer(live, 2.0)
+assert core.promote_due(3.0, 0.0, 1) == 1
+assert core.take_ready_batch(1) == [live]
+core.close()
+
+core = _uringcore.LoopCore()
+cancelled = ReentrantCancelled(core, True)
+live = ReentrantCancelled(core, False)
+core.schedule_timer(cancelled, 1.0)
+core.schedule_timer(live, 2.0)
+assert core.compact_timers() == 1
+assert core.timer_count == 1
+assert core.next_deadline() == 2.0
+core.close()
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_loop_core_timer_clear_and_gc_release_owned_handles():
+    core = _uringcore.LoopCore()
+    timer = Timer("owned")
+    reference = weakref.ref(timer)
+    core.schedule_timer(timer, 1.0)
+    del timer
+    assert reference() is not None
+    core.clear_timers()
+    assert reference() is None
+
+    cyclic = Timer("cyclic")
+    cyclic.core = core
+    reference = weakref.ref(cyclic)
+    core.schedule_timer(cyclic, 2.0)
+    del cyclic
+    del core
+    gc.collect()
+    assert reference() is None
+
+
+@pytest.mark.parametrize(
+    ("now", "resolution", "limit", "message"),
+    [(0.0, -1.0, 1, "resolution"), (0.0, 0.0, -1, "limit")],
+)
+def test_loop_core_timer_promotion_rejects_negative_bounds(now, resolution, limit, message):
+    core = _uringcore.LoopCore()
+    with pytest.raises(ValueError, match=message):
+        core.promote_due(now, resolution, limit)
 
 
 def reap_completions(ring, count):

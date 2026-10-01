@@ -95,3 +95,40 @@ heap stays bounded under cancellation stress, and sanitizer runs are clean.
 
 The lightweight review checks heap invariants, cancellation accounting,
 clock-boundary compatibility, ownership, and ABI/stub synchronization.
+
+## Implemented design
+
+- `_uringcore.LoopCore` now owns a failure-atomic binary timer heap alongside
+  the ready queue. Entries retain GC-visible strong references and use a
+  monotonic sequence number only to make the private heap deterministic; the
+  public contract still does not promise equal-deadline FIFO ordering.
+- Cancelled roots are pruned before timeout selection. Cancellation storms use
+  an ownership-safe compaction pass at the same count/fraction threshold as
+  CPython, and bounded promotion moves at most 4,096 due handles into the
+  native ready queue per tick.
+- `IoUringProactorEventLoop(timer_heap="native", ready_queue="native")` is the
+  experimental opt-in. Both defaults remain Python-backed, and native timer
+  storage requires the native ready adapter so promotion is one ownership
+  transfer inside the shared core.
+- ABI version 10 exposes timer scheduling, next-deadline lookup, bounded due
+  promotion, compaction, diagnostics, and clear operations in the private
+  stub. Direct randomized-model tests and fake-clock `_run_once` tests cover
+  the native boundary without requiring a functioning kernel ring.
+
+## Measurement interpretation
+
+`benchmarks.timer_heap` compares native and `heapq` insertion, lazy
+cancellation, next-deadline lookup, expiry, CPU/wall time, variation, and peak
+RSS in isolated processes. It deliberately avoids ring setup and I/O so the
+storage boundary is the only variable. Smoke data is retained for provenance
+and regression detection; it is not a production performance claim.
+
+## Captured smoke baseline
+
+`benchmarks/results/phase2-timer-heap-2026-08-10-wsl2.json` was captured from
+harness commit `4d6a368` on Python 3.12.3 / WSL2 with one warmup and five
+measured runs of 4,096 scheduled timers, cancelling every second timer before
+expiry. Median full-lifecycle throughput was 1.97 million timers/second for the
+native core and 0.87 million timers/second for the Python reference. Wall-time
+variation was 10.4% and 20.8%, respectively, so the raw samples are useful as
+a smoke baseline but do not justify changing the default path.
