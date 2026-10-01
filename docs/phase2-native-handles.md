@@ -95,3 +95,86 @@ benefit.
 The lightweight review checks the design evidence first, then API compatibility,
 GC/module-state ownership, failure cleanup, stub/ABI agreement, and removal of
 the rejected prototype.
+
+## Compatibility inventory
+
+The Python 3.12 and 3.13 implementations expose the same object layout and
+core behavior that this project consumes:
+
+| Surface | Required behavior and consumers |
+| --- | --- |
+| `_callback`, `_args`, `_context`, `_loop` | Strong ownership from construction through dispatch or cancellation; `Context` identity is visible through `get_context()`. |
+| `_cancelled`, `cancel()`, `cancelled()` | Idempotent cancellation; callback and args are cleared once, while debug mode caches a safe repr first. The native ready/timer paths read `_cancelled`. |
+| `_source_traceback`, `_repr`, `_repr_info()`, `__repr__()` | Debug creation location and slow-callback/error formatting must remain valid after cancellation. The loop trims the timer creation frame. |
+| `_run()` | Calls through the captured context, propagates `SystemExit`/`KeyboardInterrupt`, and routes other exceptions with `message`, `exception`, `handle`, and optional `source_traceback`. |
+| `__weakref__` and cyclic GC | Handles may participate in callback/loop cycles and must remain weak-referenceable. |
+| `_when`, `_scheduled`, `when()` | Timer deadline remains readable; cancellation notifies the loop, and native timer promotion writes `_scheduled = False`. |
+| timer hash/comparisons | Hash follows `_when`; comparisons accept compatible `TimerHandle` instances and return `NotImplemented` for unrelated types. Equality also observes callback, args, and cancellation. |
+
+Python 3.13 additionally passes the loop's debug flag to
+`_format_callback_source`; Python 3.12 does not support that keyword. A native
+replacement would therefore need a version adapter rather than embedding or
+copying either version's private struct layout. Existing compatibility and
+scheduling-contract matrices already cover FIFO snapshots, contexts,
+cancellation, debug repr, exception context, and timer behavior for every
+retained loop backend.
+
+## Implemented design gate
+
+`benchmarks.native_handles` evaluates the three planned choices with 20,000
+plain handles and 20,000 timer handles per smoke workload:
+
+1. stock `asyncio.Handle` and `asyncio.TimerHandle`;
+1. a Python-facing wrapper around a native backing record; and
+1. benchmark-only native heap-type prototypes.
+
+Each sample measures construction, real `LoopCore` ready-queue or timer-heap
+storage, context-aware callback dispatch, repeated cancellation, traced
+allocation counts, traced peak bytes, and retained shallow size. Identity,
+FIFO order, callback completion, and cancellation counts are self-checked.
+The C prototypes use GC traversal/clear/deallocation and strong reference
+ownership, and their lifetime/cycle tests run under ASAN/UBSAN. They are built
+only when `URINGLOOP_BUILD_HANDLE_PROTOTYPES=1`; they are not in `_uringcore`,
+its stubs, its ABI, or default wheels.
+
+## Captured design-gate baseline
+
+`benchmarks/results/phase2-native-handles-2026-08-10-wsl2.json` was captured
+from harness commit `108c8cb` on Python 3.12.3 / WSL2 with one warmup and five
+measured runs. Rates and sizes below are medians; CV is for complete-sample wall
+time.
+
+| Kind | Choice | Wall (s) | CV | Allocate/s | Native storage/s | Dispatch/s | Shallow B/object | Blocks/object |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Handle | stock Python | 0.0852 | 2.2% | 516,304 | 1,379,750 | 746,020 | 104 | 2.99 |
+| Handle | native record wrapper | 0.1160 | 2.5% | 381,580 | 484,402 | 1,112,282 | 144 | 3.99 |
+| Handle | full native prototype | 0.1257 | 1.0% | 558,846 | 1,353,630 | 277,026 | 96 | 2.99 |
+| Timer | stock Python | 0.2343 | 0.9% | 349,375 | 148,067 | 742,247 | 120 | 3.99 |
+| Timer | native record wrapper | 0.2888 | 3.8% | 279,415 | 121,247 | 1,052,677 | 160 | 4.99 |
+| Timer | full native prototype | 0.3376 | 1.6% | 490,430 | 147,933 | 267,706 | 112 | 2.99 |
+
+The full-native prototype allocates plain handles about 8% faster and timers
+about 40% faster than stock, with 8 bytes less shallow storage per object.
+Those local wins do not survive the complete measured path: stock handles are
+about 36% faster than the wrapper and 48% faster than the full-native prototype
+in total wall time; stock timers are about 23% and 44% faster respectively.
+The wrapper also adds one allocation and 40 shallow bytes per object. These are
+isolated design-gate results, not application-speed claims.
+
+## Decision: retain stock handle types
+
+This branch records a no-go for permanent native handle types. The stock types
+win the complete measured path with low variation, while already preserving
+the exact version-specific repr, exception, comparison, context, and GC
+contracts. The full-native prototype implements less compatibility behavior
+than a shippable type yet is still slower overall; completing that surface or
+adding a freelist would add ownership and interpreter-finalization risk without
+evidence of an end-to-end benefit.
+
+Accordingly, `IoUringProactorEventLoop` continues to construct stock asyncio
+handles, `_uringcore.ABI_VERSION` remains 12, no handle selector or freelist is
+added, and the CFFI/native oracle matrix is unchanged. Rejected prototypes are
+absent from production code and retained only as an opt-in, benchmark-package
+fixture so the decision remains reproducible. A future branch may reopen the
+gate only with a profile showing handle construction as an end-to-end
+bottleneck and a prototype that beats the complete path beyond noise.

@@ -97,6 +97,18 @@ jobs:
             --repeats 5 \
             --output "artifacts/phase2-tick-${{ matrix.python-version }}-${profile}.json"
 
+      - name: Run native handle design gate
+        env:
+          URINGLOOP_BUILD_HANDLE_PROTOTYPES: "1"
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python setup.py build_ext --inplace --force
+          uv run python -m benchmarks.native_handles \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-handles-${{ matrix.python-version }}-${profile}.json"
+
       - name: Upload raw Phase 1 benchmark results
         uses: actions/upload-artifact@v4
         with:

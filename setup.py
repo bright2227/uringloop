@@ -14,6 +14,22 @@ LIBURING_EXTENSION_NAMES = {
     "uringloop._uringcore",
 }
 SANITIZER_ENVIRONMENT_VARIABLE = "URINGLOOP_SANITIZERS"
+HANDLE_PROTOTYPES_ENVIRONMENT_VARIABLE = "URINGLOOP_BUILD_HANDLE_PROTOTYPES"
+
+
+EXTENSION_MODULES = [
+    Extension(
+        "uringloop._uringcore",
+        sources=["src/uringcore_liburing.c"],
+    ),
+]
+if os.environ.get(HANDLE_PROTOTYPES_ENVIRONMENT_VARIABLE) == "1":
+    EXTENSION_MODULES.append(
+        Extension(
+            "benchmarks._native_handle_prototypes",
+            sources=["benchmarks/native_handle_prototypes.c"],
+        )
+    )
 
 
 def sanitizer_flags():
@@ -45,17 +61,18 @@ class VendoredLiburingBuildExt(build_ext):
     """Build one private liburing archive for extensions that need it."""
 
     def build_extensions(self):
+        instrumentation_flags = sanitizer_flags()
         extensions = [extension for extension in self.extensions if extension.name in LIBURING_EXTENSION_NAMES]
         if extensions:
-            instrumentation_flags = sanitizer_flags()
             archive = self._build_vendored_liburing(instrumentation_flags)
             include_directory = archive.parent / "include"
             for extension in extensions:
                 extension.extra_objects = [*(extension.extra_objects or []), str(archive)]
                 extension.depends = [*(extension.depends or []), str(archive)]
                 extension.include_dirs = [str(include_directory)]
-                extension.extra_compile_args = [*(extension.extra_compile_args or []), *instrumentation_flags]
-                extension.extra_link_args = [*(extension.extra_link_args or []), *instrumentation_flags]
+        for extension in self.extensions:
+            extension.extra_compile_args = [*(extension.extra_compile_args or []), *instrumentation_flags]
+            extension.extra_link_args = [*(extension.extra_link_args or []), *instrumentation_flags]
 
         super().build_extensions()
 
@@ -110,10 +127,5 @@ class VendoredLiburingBuildExt(build_ext):
 setup(
     cffi_modules=["_ffi_build.py:ffibuilder"],
     cmdclass={"build_ext": VendoredLiburingBuildExt},
-    ext_modules=[
-        Extension(
-            "uringloop._uringcore",
-            sources=["src/uringcore_liburing.c"],
-        ),
-    ],
+    ext_modules=EXTENSION_MODULES,
 )
