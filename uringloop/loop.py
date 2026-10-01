@@ -85,6 +85,7 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         *,
         ready_queue: str = "python",
         timer_heap: str = "python",
+        thread_wakeup: str = "socketpair",
     ):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
@@ -95,6 +96,8 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             raise ValueError("timer_heap must be 'python' or 'native'")
         if timer_heap == "native" and ready_queue != "native":
             raise ValueError("the native timer heap requires ready_queue='native'")
+        if thread_wakeup not in {"socketpair", "eventfd"}:
+            raise ValueError("thread_wakeup must be 'socketpair' or 'eventfd'")
         if proactor is None:
             proactor = IoUringProactor()
         super().__init__(proactor)
@@ -102,6 +105,11 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         self._ready_queue_mode = ready_queue
         self._timer_heap_mode = timer_heap
         self._timer_core = None
+        self._thread_wakeup_mode = thread_wakeup
+        self._eventfd_wakeup = None
+        self._eventfd_poll_future = None
+        self._eventfd_closing = False
+        self._eventfd_poll_completions = 0
         if ready_queue == "native":
             if self._ready:
                 raise RuntimeError("cannot enable the native ready queue after scheduling callbacks")
@@ -109,6 +117,71 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             self._ready = _NativeReadyQueue(core)
             if timer_heap == "native":
                 self._timer_core = core
+        if thread_wakeup == "eventfd":
+            try:
+                wakeup = _uringcore.EventFD()
+            except BaseException:
+                super().close()
+                raise
+            self._eventfd_wakeup = wakeup
+            try:
+                self._arm_eventfd_poll()
+            except BaseException:
+                self._eventfd_wakeup = None
+                wakeup.close()
+                super().close()
+                raise
+
+    def _arm_eventfd_poll(self):
+        if self._eventfd_closing or self._eventfd_wakeup is None:
+            return
+        if self._eventfd_poll_future is not None:
+            raise RuntimeError("eventfd wakeup poll is already armed")
+        future = self._proactor.poll_add(self._eventfd_wakeup, POLLIN)
+        self._eventfd_poll_future = future
+        future.add_done_callback(self._eventfd_poll_ready)
+
+    def _eventfd_poll_ready(self, future):
+        if future is not self._eventfd_poll_future:
+            return
+        self._eventfd_poll_future = None
+        if self._eventfd_closing:
+            return
+        if future.cancelled():
+            self._arm_eventfd_poll()
+            return
+        try:
+            future.result()
+            self._eventfd_poll_completions += 1
+            self._eventfd_wakeup.drain()
+            self._arm_eventfd_poll()
+        except BaseException as error:
+            wakeup = self._eventfd_wakeup
+            self._eventfd_wakeup = None
+            self._thread_wakeup_mode = "socketpair"
+            if wakeup is not None:
+                wakeup.close()
+            # Publication preceded the failed wakeup. Switch the producer path
+            # first, then wake the still-armed signal/socketpair reader so
+            # already-ready work cannot remain stranded behind a ring wait.
+            super()._write_to_self()
+            self.call_exception_handler(
+                {
+                    "message": "eventfd wakeup poll failed",
+                    "exception": error,
+                    "future": future,
+                }
+            )
+
+    def _write_to_self(self):
+        wakeup = self._eventfd_wakeup
+        if wakeup is None:
+            return super()._write_to_self()
+        try:
+            wakeup.notify()
+        except OSError:
+            if self._debug:
+                logger.debug("Fail to write eventfd wakeup", exc_info=True)
 
     def call_at(self, when, callback, *args, context=None):
         if self._timer_core is None:
@@ -181,7 +254,19 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
 
     def close(self):
         ready = self._ready
-        super().close()
+        wakeup = self._eventfd_wakeup
+        if wakeup is not None:
+            self._eventfd_closing = True
+            future = self._eventfd_poll_future
+            self._eventfd_poll_future = None
+            if future is not None:
+                future.cancel()
+        try:
+            super().close()
+        finally:
+            if wakeup is not None:
+                self._eventfd_wakeup = None
+                wakeup.close()
         if isinstance(ready, _NativeReadyQueue):
             ready.close()
 

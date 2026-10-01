@@ -3,6 +3,7 @@
 #include <structmember.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <liburing.h>
 #include <stdint.h>
@@ -11,6 +12,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 typedef enum {
     URINGCORE_REQUEST_PREPARED = 0,
@@ -44,6 +47,7 @@ typedef struct UringCoreLiburingRequest UringCoreLiburingRequest;
 typedef struct UringCoreLiburingCompletion UringCoreLiburingCompletion;
 typedef struct UringCoreProvidedBuffer UringCoreProvidedBuffer;
 typedef struct UringCoreLoopCore UringCoreLoopCore;
+typedef struct UringCoreEventFD UringCoreEventFD;
 
 typedef struct {
     PyObject *handle;
@@ -65,6 +69,16 @@ struct UringCoreLoopCore {
     int python_callback_active;
     int initialized;
     int closed;
+};
+
+struct UringCoreEventFD {
+    PyObject_HEAD
+    unsigned long long write_count;
+    unsigned long long drain_count;
+    int fd;
+    int signalled;
+    int closed;
+    int initialized;
 };
 
 struct UringCoreLiburingRequest {
@@ -133,6 +147,7 @@ static PyTypeObject UringCoreLiburingRequestType;
 static PyTypeObject UringCoreLiburingCompletionType;
 static PyTypeObject UringCoreProvidedBufferType;
 static PyTypeObject UringCoreLoopCoreType;
+static PyTypeObject UringCoreEventFDType;
 
 static void
 uringcore_loop_core_release_ready(UringCoreLoopCore *self)
@@ -949,6 +964,296 @@ static PyTypeObject UringCoreLoopCoreType = {
     .tp_new = uringcore_loop_core_new,
     .tp_traverse = (traverseproc)uringcore_loop_core_traverse,
     .tp_clear = (inquiry)uringcore_loop_core_clear,
+};
+
+static int
+uringcore_eventfd_require_open(UringCoreEventFD *self)
+{
+    if (self->closed || self->fd < 0) {
+        PyErr_SetString(PyExc_RuntimeError, "eventfd wakeup is closed");
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+uringcore_eventfd_new(
+    PyTypeObject *type,
+    PyObject *Py_UNUSED(args),
+    PyObject *Py_UNUSED(kwargs))
+{
+    UringCoreEventFD *self = (UringCoreEventFD *)type->tp_alloc(type, 0);
+
+    if (self != NULL) {
+        self->fd = -1;
+        self->closed = 1;
+    }
+    return (PyObject *)self;
+}
+
+static int
+uringcore_eventfd_init(
+    UringCoreEventFD *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    static char *keyword_names[] = {"setup_errno", NULL};
+    int setup_errno = 0;
+    int fd;
+
+    if (self->initialized) {
+        PyErr_SetString(PyExc_RuntimeError, "eventfd wakeup cannot be reinitialized");
+        return -1;
+    }
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "|i:EventFD",
+            keyword_names,
+            &setup_errno)) {
+        return -1;
+    }
+    if (setup_errno < 0) {
+        PyErr_SetString(PyExc_ValueError, "setup_errno cannot be negative");
+        return -1;
+    }
+    if (setup_errno != 0) {
+        errno = setup_errno;
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (fd < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    self->fd = fd;
+    self->closed = 0;
+    self->signalled = 0;
+    self->initialized = 1;
+    return 0;
+}
+
+static PyObject *
+uringcore_eventfd_notify(
+    UringCoreEventFD *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    uint64_t value = 1;
+    ssize_t result;
+
+    if (uringcore_eventfd_require_open(self) < 0) {
+        return NULL;
+    }
+    if (self->signalled) {
+        Py_RETURN_FALSE;
+    }
+    do {
+        result = write(self->fd, &value, sizeof(value));
+    } while (result < 0 && errno == EINTR);
+    if (result < 0 && errno == EAGAIN) {
+        self->signalled = 1;
+        Py_RETURN_FALSE;
+    }
+    if (result < 0) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    if (result != (ssize_t)sizeof(value)) {
+        PyErr_SetString(PyExc_OSError, "eventfd wakeup write was incomplete");
+        return NULL;
+    }
+    self->signalled = 1;
+    self->write_count++;
+    Py_RETURN_TRUE;
+}
+
+static PyObject *
+uringcore_eventfd_drain(
+    UringCoreEventFD *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    uint64_t value;
+    unsigned long long total = 0;
+    ssize_t result;
+
+    if (uringcore_eventfd_require_open(self) < 0) {
+        return NULL;
+    }
+    for (;;) {
+        do {
+            result = read(self->fd, &value, sizeof(value));
+        } while (result < 0 && errno == EINTR);
+        if (result < 0 && errno == EAGAIN) {
+            break;
+        }
+        if (result < 0) {
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+        if (result != (ssize_t)sizeof(value)) {
+            PyErr_SetString(PyExc_OSError, "eventfd wakeup read was incomplete");
+            return NULL;
+        }
+        if (ULLONG_MAX - total < value) {
+            total = ULLONG_MAX;
+        }
+        else {
+            total += value;
+        }
+        self->drain_count++;
+    }
+    self->signalled = 0;
+    return PyLong_FromUnsignedLongLong(total);
+}
+
+static PyObject *
+uringcore_eventfd_fileno(
+    UringCoreEventFD *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    if (uringcore_eventfd_require_open(self) < 0) {
+        return NULL;
+    }
+    return PyLong_FromLong(self->fd);
+}
+
+static PyObject *
+uringcore_eventfd_close(
+    UringCoreEventFD *self,
+    PyObject *Py_UNUSED(ignored))
+{
+    int fd = self->fd;
+
+    self->fd = -1;
+    self->closed = 1;
+    self->signalled = 0;
+    if (fd >= 0 && close(fd) < 0) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    Py_RETURN_NONE;
+}
+
+static void
+uringcore_eventfd_dealloc(UringCoreEventFD *self)
+{
+    int saved_errno = errno;
+
+    if (self->fd >= 0) {
+        close(self->fd);
+    }
+    errno = saved_errno;
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *
+uringcore_eventfd_get_signalled(
+    UringCoreEventFD *self,
+    void *Py_UNUSED(context))
+{
+    return PyBool_FromLong(self->signalled);
+}
+
+static PyObject *
+uringcore_eventfd_get_closed(
+    UringCoreEventFD *self,
+    void *Py_UNUSED(context))
+{
+    return PyBool_FromLong(self->closed);
+}
+
+static PyObject *
+uringcore_eventfd_get_write_count(
+    UringCoreEventFD *self,
+    void *Py_UNUSED(context))
+{
+    return PyLong_FromUnsignedLongLong(self->write_count);
+}
+
+static PyObject *
+uringcore_eventfd_get_drain_count(
+    UringCoreEventFD *self,
+    void *Py_UNUSED(context))
+{
+    return PyLong_FromUnsignedLongLong(self->drain_count);
+}
+
+static PyMethodDef uringcore_eventfd_methods[] = {
+    {
+        "notify",
+        (PyCFunction)uringcore_eventfd_notify,
+        METH_NOARGS,
+        PyDoc_STR("Publish one coalesced eventfd wakeup."),
+    },
+    {
+        "drain",
+        (PyCFunction)uringcore_eventfd_drain,
+        METH_NOARGS,
+        PyDoc_STR("Drain the eventfd counter and clear coalescing state."),
+    },
+    {
+        "fileno",
+        (PyCFunction)uringcore_eventfd_fileno,
+        METH_NOARGS,
+        PyDoc_STR("Return the private eventfd descriptor while open."),
+    },
+    {
+        "close",
+        (PyCFunction)uringcore_eventfd_close,
+        METH_NOARGS,
+        PyDoc_STR("Idempotently close the private eventfd descriptor."),
+    },
+    {NULL, NULL, 0, NULL},
+};
+
+static PyGetSetDef uringcore_eventfd_getset[] = {
+    {
+        "signalled",
+        (getter)uringcore_eventfd_get_signalled,
+        NULL,
+        PyDoc_STR("Whether a wakeup is currently coalesced."),
+        NULL,
+    },
+    {
+        "closed",
+        (getter)uringcore_eventfd_get_closed,
+        NULL,
+        PyDoc_STR("Whether the descriptor is closed."),
+        NULL,
+    },
+    {
+        "write_count",
+        (getter)uringcore_eventfd_get_write_count,
+        NULL,
+        PyDoc_STR("Number of kernel writes performed after coalescing."),
+        NULL,
+    },
+    {
+        "drain_count",
+        (getter)uringcore_eventfd_get_drain_count,
+        NULL,
+        PyDoc_STR("Number of eventfd counter reads performed."),
+        NULL,
+    },
+    {NULL},
+};
+
+PyDoc_STRVAR(
+    uringcore_eventfd_doc,
+    "EventFD(setup_errno=0)\n"
+    "--\n"
+    "\n"
+    "Own a private coalescing eventfd for loop wakeups.");
+
+static PyTypeObject UringCoreEventFDType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "uringloop._uringcore.EventFD",
+    .tp_basicsize = sizeof(UringCoreEventFD),
+    .tp_dealloc = (destructor)uringcore_eventfd_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = uringcore_eventfd_doc,
+    .tp_methods = uringcore_eventfd_methods,
+    .tp_getset = uringcore_eventfd_getset,
+    .tp_init = (initproc)uringcore_eventfd_init,
+    .tp_new = uringcore_eventfd_new,
 };
 
 static void
@@ -3508,6 +3813,9 @@ PyInit__uringcore(void)
     if (PyType_Ready(&UringCoreLoopCoreType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&UringCoreEventFDType) < 0) {
+        return NULL;
+    }
     if (PyType_Ready(&UringCoreLiburingRequestType) < 0) {
         return NULL;
     }
@@ -3530,6 +3838,13 @@ PyInit__uringcore(void)
             module,
             "LoopCore",
             (PyObject *)&UringCoreLoopCoreType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddObjectRef(
+            module,
+            "EventFD",
+            (PyObject *)&UringCoreEventFDType) < 0) {
         Py_DECREF(module);
         return NULL;
     }
@@ -3561,7 +3876,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 10) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 11) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(

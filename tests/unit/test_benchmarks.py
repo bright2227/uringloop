@@ -1,5 +1,6 @@
 import pytest
 
+from benchmarks.eventfd_wakeup import BACKENDS as WAKEUP_BACKENDS, WakeupWorkload, worker_result as wakeup_worker_result
 from benchmarks.phase1 import Workload, matrix, parse_strace_summary, percentile
 from benchmarks.phase2 import SchedulingWorkload, matrix as scheduling_matrix, worker_result
 from benchmarks.ready_queue import ReadyQueueWorkload, backends_for, worker_result as ready_queue_worker_result, workloads
@@ -110,6 +111,16 @@ def test_timer_heap_worker_reports_insert_cancel_and_expiry_phases(backend):
     assert result["summary"]["cancel_seconds_median"] >= 0
     assert result["summary"]["expire_seconds_median"] >= 0
     assert result["summary"]["operations_per_second_median"] > 0
+
+
+def test_wakeup_worker_reports_idle_latency_and_burst_write_counts():
+    result = wakeup_worker_result("eventfd", WakeupWorkload(4, 32, 2), warmup=0, repeats=2)
+
+    assert WAKEUP_BACKENDS == ("eventfd", "socketpair")
+    assert len(result["samples"]) == 2
+    assert result["summary"]["idle_latency_p99_us_median"] > 0
+    assert result["summary"]["idle_writes_median"] == 4
+    assert result["summary"]["burst_writes_median"] >= 1
 
 
 def test_strace_summary_extracts_per_syscall_counts(tmp_path):

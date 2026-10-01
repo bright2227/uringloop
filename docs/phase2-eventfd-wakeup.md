@@ -95,3 +95,43 @@ clean.
 
 The lightweight review checks publish/wakeup ordering, poll lifetime, fd close
 order, signal separation, error handling, and the measured syscall claim.
+
+## Implemented design
+
+- Private `_uringcore.EventFD` ownership uses `EFD_NONBLOCK | EFD_CLOEXEC`,
+  coalesces notifications under the GIL, retries `EINTR`, treats counter
+  saturation as an already-pending wakeup, drains to `EAGAIN`, and closes
+  idempotently. ABI version 11 includes private write/read diagnostics and
+  deterministic setup-error injection.
+- `IoUringProactorEventLoop(thread_wakeup="eventfd")` arms one `POLLIN`
+  request, drains and re-arms it after completion, and re-arms recoverable
+  cancellation races. Close first prevents re-arm, then cancels the request,
+  closes the proactor/ring, and only then closes the descriptor.
+- Callback publication still occurs in `BaseEventLoop.call_soon_threadsafe`
+  before `_write_to_self` notifies eventfd. The existing socketpair and
+  self-reading request remain dedicated to CPython's byte-oriented signal
+  wakeup contract; eventfd is never passed to `signal.set_wakeup_fd`.
+- The default remains `thread_wakeup="socketpair"`. Direct descriptor tests,
+  a fake-proactor state-machine suite, multi-producer e2e coverage, signal
+  delivery, setup failure, saturation, and close behavior cover the opt-in.
+
+## Measurement interpretation
+
+`benchmarks.eventfd_wakeup` measures cross-thread idle latency, burst writes,
+drain reads, CPU/wall time, variation, and RSS for eventfd and the socketpair
+reference in isolated processes. The restricted development sandbox blocks
+socket writes, so a committed local smoke capture may contain the eventfd side
+only; CI runs both backends, while the prior Phase 2 scheduling baseline
+remains the auditable socketpair loop reference. No syscall or latency
+improvement is claimed from a one-sided local capture.
+
+## Captured smoke baseline
+
+`benchmarks/results/phase2-eventfd-wakeup-2026-08-10-wsl2.json` was captured
+from harness commit `5995820` on Python 3.12.3 / WSL2 with one warmup and five
+measured runs. Each run used 64 serialized idle notifications and a 4,096-call
+burst from four producers. Eventfd performed the expected 64 idle writes and
+one coalesced burst write; median idle latency was 30.2 microseconds at p50 and
+67.3 microseconds at p99, with 14.4% wall-time variation. The socketpair side
+could not execute under the local syscall sandbox and is intentionally absent,
+so these figures validate instrumentation and coalescing only.

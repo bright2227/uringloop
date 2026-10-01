@@ -1,8 +1,11 @@
 import errno
+import fcntl
 import gc
+import os
 import random
 import select
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -16,12 +19,57 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 10
+    assert _uringcore.ABI_VERSION == 11
+    assert _uringcore.EventFD.__module__ == "uringloop._uringcore"
     assert _uringcore.LoopCore.__module__ == "uringloop._uringcore"
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
     assert _uringcore.ProvidedBuffer.__module__ == "uringloop._uringcore"
+
+
+def test_native_eventfd_coalesces_drains_and_owns_descriptor():
+    wakeup = _uringcore.EventFD()
+    fd = wakeup.fileno()
+
+    assert fcntl.fcntl(fd, fcntl.F_GETFD) & fcntl.FD_CLOEXEC
+    assert fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_NONBLOCK
+    assert wakeup.signalled is False
+    assert wakeup.notify() is True
+    assert wakeup.notify() is False
+    assert wakeup.signalled is True
+    assert wakeup.drain() == 1
+    assert wakeup.drain() == 0
+    assert wakeup.signalled is False
+    assert wakeup.write_count == 1
+    assert wakeup.drain_count == 1
+
+    wakeup.close()
+    wakeup.close()
+    assert wakeup.closed is True
+    with pytest.raises(RuntimeError, match="closed"):
+        wakeup.fileno()
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(fd)
+
+
+def test_native_eventfd_treats_counter_saturation_as_pending_wakeup():
+    wakeup = _uringcore.EventFD()
+    try:
+        os.write(wakeup.fileno(), struct.pack("Q", 2**64 - 2))
+        assert wakeup.notify() is False
+        assert wakeup.signalled is True
+        assert wakeup.drain() == 2**64 - 2
+        assert wakeup.signalled is False
+    finally:
+        wakeup.close()
+
+
+def test_native_eventfd_setup_failure_is_precise_and_does_not_initialize():
+    with pytest.raises(PermissionError, match="Operation not permitted"):
+        _uringcore.EventFD(setup_errno=errno.EPERM)
+    with pytest.raises(ValueError, match="cannot be negative"):
+        _uringcore.EventFD(setup_errno=-1)
 
 
 def test_loop_core_ready_queue_is_fifo_and_bounded_by_snapshot():
