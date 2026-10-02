@@ -13,6 +13,7 @@ from uringloop import _uringcore
 from uringloop.lib import POLLERR, POLLHUP, POLLIN
 from uringloop.log import logger
 from uringloop.proactor import IoUringProactor
+from uringloop.stream_transport import IoUringSocketTransport, _PartialWriteMixin
 
 
 class _NativeReadyQueue:
@@ -53,7 +54,7 @@ class _NativeReadyQueue:
         self._core.close()
 
 
-class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport):  # type: ignore[reportPrivateUsage]
+class _IoUringWritePipeTransport(_PartialWriteMixin, proactor_events._ProactorBaseWritePipeTransport):  # type: ignore[reportPrivateUsage]
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
         self._read_fut = cast(IoUringProactor, self._loop._proactor).poll_add(self._sock, POLLERR | POLLHUP)  # type: ignore[reportPrivateUsage]
@@ -78,6 +79,11 @@ class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport
 
 class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
     """Linux version of proactor event loop using IoUring."""
+
+    def _make_socket_transport(self, sock, protocol, waiter=None, extra=None, server=None):
+        # Both proactors report the count from one kernel operation, unlike
+        # CPython's Windows proactor's complete logical-write contract.
+        return IoUringSocketTransport(self, sock, protocol, waiter, extra, server)
 
     def __init__(
         self,
@@ -395,6 +401,10 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         view = memoryview(data).cast("B")
         while len(view) > 0:
             sent = await self._proactor.send(sock, view)
+            if type(sent) is not int or not 0 <= sent <= len(view):
+                raise OSError(errno.EIO, "invalid stream write completion")
+            if sent == 0:
+                raise ConnectionResetError("stream write made no progress")
             # a partial send must continue after the sent bytes, not resend
             # the whole buffer from the start
             view = view[sent:]
