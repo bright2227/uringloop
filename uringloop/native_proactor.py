@@ -165,7 +165,39 @@ class NativeIoUringProactor:
 
     def _flush(self):
         if self._pending_submit:
-            self._ring.submit()
+            try:
+                self._ring.submit()
+            except BaseException as error:
+                # liburing publishes SQEs before entering the kernel. On an
+                # error, logically "prepared" requests may no longer be local
+                # and cannot be rewritten safely (especially with SQPOLL).
+                # Retire the entire ring BEFORE callbacks can close/reuse fds.
+                self._ring.close()
+                self._ring = None
+                self._pending_submit = False
+                while self._cache:
+                    _, pending = self._cache.popitem()
+                    if pending.future is not None and not pending.future.done():
+                        try:
+                            pending.future.set_exception(error)
+                        except BaseException:
+                            # A failing callback scheduler must not prevent
+                            # teardown of other owned operations/transports.
+                            pass
+                self._transport_requests.clear()
+                while self._transports:
+                    transport = self._transports.pop()
+                    try:
+                        # The failed ring cannot drive another loop tick. Force
+                        # native server detach now, not in a queued lost callback
+                        # that loop.close() may discard.
+                        close_transport = getattr(transport, "_close_for_loop", None)
+                        if close_transport is None:
+                            close_transport = transport.abort
+                        close_transport()
+                    except BaseException:
+                        pass
+                raise
             self._pending_submit = False
 
     def select(self, timeout: float | None = None):
@@ -250,11 +282,19 @@ class NativeIoUringProactor:
 
     def cancel_transport(self, request: Any):
         """Cancel a transport request, retaining its callback until retirement."""
+        if request.state == "released":
+            return
         self._check_closed()
         if request not in self._transport_requests or request not in self._cache:
             return
         if request.state == "prepared":
-            self._flush()
+            # Never submit an unpublished fd operation merely to cancel it.
+            # Submission may fail; the transport will still close the socket,
+            # and retrying that SQE later could target a reused numeric fd.
+            # Keep its identity/exports through final retirement as a safe NOP.
+            if request.kind != "nop":
+                self._ring.abandon_prepared(request)
+            return
         try:
             cancellation = self._prepare(self._ring.prepare_cancel, request)
         except (RuntimeError, ValueError):

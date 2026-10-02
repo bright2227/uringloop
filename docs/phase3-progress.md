@@ -1,10 +1,16 @@
 # Phase 3 progress — 2026-10-02
 
 Phase 3 is in experimental foundation work, not complete. No branch has been
-merged or pushed. The working stack is in the durable independent checkout
+merged or pushed by this work. The working stack is in the durable independent checkout
 `/home/bright2227/uringloop/recovered-phase2`, because the original checkout's
 Git metadata remains read-only. The original unrelated Unix-test newline
 change is preserved and excluded from task commits.
+
+The user has confirmed Phase 2 is already fixed and merged. The recovery notes
+below describe this local historical copy, not the current remote merge status.
+This Phase 3 checkout still needs comparison with the actual merged base;
+remote verification is blocked by GitHub DNS resolution here. The shutdown fix
+below is confined to new Phase 3 code and does not reopen Phase 2 work.
 
 ## Recovered foundation
 
@@ -72,15 +78,26 @@ Reviewed local branch checkpoints:
   getters, scheduler/exception-handler failure and six seeded Python-oracle
   comparisons. Previously failing cases exposed stranded write producers,
   nonterminal scheduling failures and stale result application; these are fixed.
-  Routing coverage grows to 17 cases, including allocation failures.
+  Routing coverage now has 35 cases, including allocation and shutdown failures.
 - Registration allocation recovery allocates the GC-tracked record before
   preparing its operation. If cache/set insertion fails, the new private
   `Ring.abandon_prepared` converts its unpublished local fd SQE into NOP,
   retaining CQE/buffer ownership until retirement. It cannot abandon submitted
   operations. Real-kernel NOP retirement tests are added but remain unverified.
-- Final lightweight reviews of flow state and rollback found no new high/medium
+- Initial lightweight reviews of flow state and rollback found no new high/medium
   findings. Review rerun: 124 focused tests pass. This is implementation review,
   not kernel-validation or integration approval.
+- A subsequent fresh review found a prepared-SQE fd-reuse hazard on shutdown.
+  The fix cancels unpublished stream operations by converting them to NOP,
+  without submitting them merely to cancel them. If submission has already
+  published SQEs and then fails, the proactor closes the ring before any socket
+  cleanup, settles public Futures, force-detaches native servers synchronously,
+  and re-raises the original error. That failure is fatal; the ring is not retried.
+  Submitted-request cancellation remains unchanged. Buffer/CQE ownership is
+  retained for local NOPs until final retirement; released requests are no-ops.
+  Regression coverage includes publication-before-error (ENOMEM/no-progress/
+  interrupt), reads/writes/both, peer cleanup failure, and server close without
+  draining callbacks. Re-review found no remaining blocker in this narrow fix.
 - Multishot receive/accept/poll, separate direct BufferedProtocol receive and
   transport SEND_ZC remain pending. Do not enable them before the one-shot
   stream kernel gates pass.
@@ -88,8 +105,8 @@ Reviewed local branch checkpoints:
 ## Verification so far
 
 Native/CFFI extensions built on CPython 3.12.3 and 3.13.7. On each interpreter,
-231 focused unit tests and 30 ring-independent native core/EventFD/guard tests pass
-(261 checks per interpreter). The latter run explicitly deselects 57
+249 focused unit tests and 30 ring-independent native core/EventFD/guard tests pass
+(279 checks per interpreter). The latter run explicitly deselects 57
 ring-dependent tests; it is not a full e2e-suite pass. Ruff and diff checks
 pass for the new runtime and test files.
 
@@ -100,7 +117,7 @@ for the same dependencies. This is not a clean pip-installed wheel result
 (pip is unavailable here). The source distribution contains both native
 headers and stream modules. ABI15 import and `Ring.abandon_prepared` presence
 were verified from the isolated final wheel. Full-project Ruff checks pass.
-A separate ABI15 ASAN/UBSAN build passed 182 focused transport/dispatcher tests, with
+A separate ABI15 ASAN/UBSAN build with the updated Python routing passed 200 focused transport/dispatcher tests, with
 `ASAN_OPTIONS=detect_leaks=0`; this is not a kernel or leak-detector pass.
 
 The first nine local benchmark smoke attempts produced no successful measurements:

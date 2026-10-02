@@ -1,21 +1,26 @@
 """Native transport request routing does not allocate asyncio Futures."""
 
+from asyncio import base_events
 from collections import deque
 import errno
 from types import SimpleNamespace
 import weakref
 
 import pytest
+from test_phase3_transport_contracts import FakeSocket, RecordingProtocol
 
 from uringloop.native_proactor import NativeIoUringProactor
+from uringloop.native_stream import NativeStreamTransport
 
 
 class Request:
-    def __init__(self, kind, buffer=None, target=None):
+    def __init__(self, kind, buffer=None, target=None, file=None):
         self.kind = kind
         self.buffer = memoryview(buffer) if buffer is not None else None
         self.target = target
         self.state = "prepared"
+        self.local = True
+        self.fd = file.fileno() if hasattr(file, "fileno") else None
 
 
 class Ring:
@@ -26,14 +31,16 @@ class Ring:
         self.requests = []
         self.completions = deque()
         self.closed = False
+        self.submit_error = None
+        self.submitted_fd_operations = []
 
     def prepare_recv(self, file, buffer):
-        request = Request("recv", buffer)
+        request = Request("recv", buffer, file=file)
         self.requests.append(request)
         return request
 
     def prepare_send(self, file, buffer):
-        request = Request("send", buffer)
+        request = Request("send", buffer, file=file)
         self.requests.append(request)
         return request
 
@@ -44,11 +51,21 @@ class Ring:
 
     def abandon_prepared(self, request):
         assert request.state == "prepared"
+        if not request.local:
+            raise ValueError("request is no longer in the local submission queue")
         request.kind = "nop"
 
     def submit(self):
+        # Match liburing: local SQEs are published before enter can fail, while
+        # a failed enter leaves the C Request logically "prepared".
+        for request in self.requests:
+            request.local = False
+        if self.submit_error is not None:
+            raise self.submit_error
         for request in self.requests:
             if request.state == "prepared":
+                if request.kind in {"recv", "send"}:
+                    self.submitted_fd_operations.append((request.kind, request.fd))
                 request.state = "submitted"
 
     def wait(self, **kwargs):
@@ -58,6 +75,8 @@ class Ring:
 
     def close(self):
         self.closed = True
+        for request in self.requests:
+            request.state = "released"
 
 
 @pytest.fixture
@@ -119,8 +138,31 @@ def test_transport_callback_pins_owner_until_final_retirement(proactor):
     assert reference() is None
 
 
-def test_cancel_flushes_prepared_request_and_retains_original_callback(proactor):
+def test_cancel_abandons_prepared_request_without_submitting_and_retains_callback(proactor):
+    seen = []
+    payload = bytearray(b"owned")
+    request = proactor.recv_transport(object(), payload, seen.append)
+    proactor._ring.submit_error = OSError(errno.ENOMEM, "must not submit to cancel")
+    proactor.cancel_transport(request)
+    proactor.cancel_transport(request)
+    assert request.state == "prepared"
+    assert request.kind == "nop"
+    assert request.buffer.obj is payload
+    assert proactor._ring.requests == [request]
+    assert request in proactor._cache
+    assert request in proactor._transport_requests
+    proactor._ring.submit_error = None
+    proactor._flush()
+    completion = SimpleNamespace(request=request, result=0, final=True)
+    proactor._handle_completion(completion)
+    assert seen == [completion]
+    assert not proactor._cache
+    assert not proactor._transport_requests
+
+
+def test_cancel_submitted_request_retains_callback_until_original_retirement(proactor):
     request = proactor.recv_transport(object(), bytearray(4), lambda completion: None)
+    proactor._flush()
     proactor.cancel_transport(request)
     assert request.state == "submitted"
     cancellation = proactor._ring.requests[-1]
@@ -230,6 +272,7 @@ def test_cancel_prepare_failure_keeps_request_and_exported_buffer_until_final(pr
     seen = []
     payload = bytearray(b"owned")
     request = proactor.send_transport(object(), payload, seen.append)
+    proactor._flush()
     error = OSError(errno.ENOMEM, "cancel prepare failed")
 
     def fail(*args):
@@ -253,6 +296,7 @@ def test_cancel_error_reports_request_without_retiring_original(proactor):
     errors = []
     proactor.set_loop(SimpleNamespace(call_exception_handler=errors.append))
     request = proactor.recv_transport(object(), bytearray(4), lambda completion: None)
+    proactor._flush()
     proactor.cancel_transport(request)
     cancellation = proactor._ring.requests[-1]
     proactor._handle_completion(SimpleNamespace(request=cancellation, result=-errno.EINVAL, final=True))
@@ -328,3 +372,190 @@ def test_registration_record_allocation_failure_happens_before_prepare(proactor,
     assert raised.value is error
     assert not proactor._ring.requests
     assert not proactor._pending_submit
+
+
+@pytest.mark.parametrize("operation", ["recv", "send", "both"])
+@pytest.mark.parametrize("action", ["abort", "_close_for_loop"])
+def test_c_transport_shutdown_cannot_submit_closed_fd_after_submit_failure(proactor, operation, action):
+    loop = base_events.BaseEventLoop()
+    loop._proactor = proactor
+    proactor.set_loop(loop)
+    errors = []
+    loop.set_exception_handler(lambda loop, context: errors.append(context))
+    sock, protocol = FakeSocket(), RecordingProtocol()
+    transport = NativeStreamTransport(loop, sock, protocol)
+
+    def drain():
+        for _ in range(30):
+            if not loop._ready:
+                return
+            for _ in range(len(loop._ready)):
+                loop._ready.popleft()._run()
+        raise AssertionError("transport callbacks did not settle")
+
+    try:
+        if operation == "send":
+            transport.pause_reading()
+        drain()
+        if operation != "recv":
+            transport.write(b"do not send to a reused fd")
+            drain()
+        ring = proactor._ring
+        original = list(ring.requests)
+        assert [request.kind for request in original] == {"recv": ["recv"], "send": ["send"], "both": ["recv", "send"]}[
+            operation
+        ]
+        ring.submit_error = OSError(errno.ENOMEM, "scripted submission failure")
+        getattr(transport, action)()
+        drain()
+        assert sock.close_count == 1
+        assert all(request.kind == "nop" for request in original)
+        assert not ring.submitted_fd_operations
+        # Even with a successful later submit and numeric fd reuse, only NOPs
+        # may enter the kernel. The real C state and Python routing stay alive
+        # until their final completions, not merely until connection_lost.
+        ring.submit_error = None
+        proactor._flush()
+        assert not ring.submitted_fd_operations
+        for request in original:
+            proactor._handle_completion(SimpleNamespace(request=request, result=0, final=True))
+        drain()
+        assert not proactor._cache
+        assert not proactor._transport_requests
+        assert sum(event[0] == "lost" for event in protocol.events) == (action == "abort")
+        assert not errors
+    finally:
+        transport.abort()
+        drain()
+        loop.close()
+
+
+@pytest.mark.parametrize("operation", ["recv", "send", "both"])
+@pytest.mark.parametrize("failure", ["oserror", "no_progress", "interrupt"])
+def test_published_submission_failure_retires_ring_before_c_transport_closes_fd(proactor, operation, failure):
+    loop = base_events.BaseEventLoop()
+    loop._proactor = proactor
+    proactor.set_loop(loop)
+    errors = []
+    loop.set_exception_handler(lambda loop, context: errors.append(context))
+    ring = proactor._ring
+
+    class OrderedSocket(FakeSocket):
+        def close(self):
+            assert ring.closed, "published SQEs must retire before fd close"
+            super().close()
+
+    sock, protocol = OrderedSocket(), RecordingProtocol()
+    transport = NativeStreamTransport(loop, sock, protocol)
+
+    def drain():
+        for _ in range(30):
+            if not loop._ready:
+                return
+            for _ in range(len(loop._ready)):
+                loop._ready.popleft()._run()
+        raise AssertionError("transport callbacks did not settle")
+
+    try:
+        if operation == "send":
+            transport.pause_reading()
+        drain()
+        if operation != "recv":
+            transport.write(b"old socket payload")
+            drain()
+        original = list(ring.requests)
+        assert all(request.local and request.state == "prepared" for request in original)
+        error = {
+            "oserror": OSError(errno.ENOMEM, "published submission failure"),
+            "no_progress": RuntimeError("submission made no progress"),
+            "interrupt": KeyboardInterrupt(),
+        }[failure]
+        ring.submit_error = error
+        with pytest.raises(type(error)) as raised:
+            proactor._flush()
+        assert raised.value is error
+        assert all(not request.local and request.state == "released" for request in original)
+        assert proactor._ring is None
+        assert not proactor._pending_submit
+        assert not proactor._cache
+        assert not proactor._transport_requests
+        assert sock.close_count == 1
+        assert not ring.submitted_fd_operations
+        # The proactor cannot retry the old published fd operations.
+        proactor._flush()
+        assert not ring.submitted_fd_operations
+        drain()
+        # Fatal proactor shutdown uses the synchronous loop-close hook, not a
+        # connection_lost callback that cannot be driven by a closed ring.
+        assert protocol.events == [("made",)]
+        assert not errors
+    finally:
+        transport.abort()
+        drain()
+        loop.close()
+
+
+def test_submission_failure_settles_public_futures_and_finishes_all_transport_peers(proactor):
+    loop = base_events.BaseEventLoop()
+    error = OSError(errno.ENOMEM, "published submission failure")
+    future = loop.create_future()
+    request = proactor._ring.prepare_recv(object(), bytearray(4))
+    proactor._register(request, future, object(), None)
+    seen = []
+
+    class Owner:
+        def __init__(self, fails):
+            self.fails = fails
+
+        def abort(self):
+            assert request.state == "released"
+            seen.append(self.fails)
+            if self.fails:
+                raise RuntimeError("peer abort failed")
+
+    good, bad = Owner(False), Owner(True)
+    proactor.register_transport(good)
+    proactor.register_transport(bad)
+    proactor._ring.submit_error = error
+    try:
+        with pytest.raises(OSError) as raised:
+            proactor._flush()
+        assert raised.value is error
+        assert sorted(seen) == [False, True]
+        assert future.exception() is error
+        assert proactor._ring is None
+        assert not proactor._cache
+        assert not proactor._transports
+    finally:
+        loop.close()
+
+
+def test_failed_submission_detaches_server_without_draining_ready_callbacks(proactor):
+    loop = base_events.BaseEventLoop()
+    loop._proactor = proactor
+    proactor.set_loop(loop)
+    events = []
+    server = object()
+    loop._native_server_attach = lambda owner, transport: events.append(("attach", owner))
+    loop._native_server_detach = lambda owner, transport: events.append(("detach", owner))
+    sock, protocol = FakeSocket(), RecordingProtocol()
+    transport = NativeStreamTransport(loop, sock, protocol, server=server)
+    try:
+        for _ in range(3):
+            for _ in range(len(loop._ready)):
+                loop._ready.popleft()._run()
+        assert events == [("attach", server)]
+        proactor._ring.submit_error = OSError(errno.ENOMEM, "published submission failure")
+        with pytest.raises(OSError):
+            proactor._flush()
+        assert events == [("attach", server), ("detach", server)]
+        assert sock.close_count == 1
+        # No callback draining: a subsequent close must not depend on any lost
+        # callback running before the loop discards its ready queue.
+        proactor.close()
+        loop.close()
+        assert events == [("attach", server), ("detach", server)]
+        assert protocol.events == [("made",)]
+    finally:
+        transport._close_for_loop()
+        loop.close()
