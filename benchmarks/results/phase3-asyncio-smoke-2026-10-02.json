@@ -1,0 +1,276 @@
+{
+  "environment": {
+    "cpu_count": 8,
+    "executable": "/home/bright2227/uringloop/.venv/bin/python",
+    "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+    "git_dirty": true,
+    "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+    "kernel": "6.18.40.1-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "timestamp_utc": "2026-10-02T06:58:32.817368+00:00"
+  },
+  "measurement_scope": "connection-setup-verified-echo-and-cleanup",
+  "profile": "smoke",
+  "report": "phase3-transport-scaffold",
+  "results": [
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:32.951376+00:00"
+      },
+      "error": {
+        "errno": null,
+        "message": "could not bind on any address out of [('127.0.0.1', 0)]",
+        "type": "OSError"
+      },
+      "samples": [],
+      "status": "error",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": false
+      }
+    },
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:33.111812+00:00"
+      },
+      "error": {
+        "errno": null,
+        "message": "could not bind on any address out of [('127.0.0.1', 0)]",
+        "type": "OSError"
+      },
+      "samples": [],
+      "status": "error",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": true
+      }
+    },
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:33.271147+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": false
+      }
+    },
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:33.444177+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": true
+      }
+    },
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:33.669809+00:00"
+      },
+      "error": {
+        "errno": null,
+        "message": "could not bind on any address out of [('127.0.0.1', 0)]",
+        "type": "OSError"
+      },
+      "samples": [],
+      "status": "error",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": false
+      }
+    },
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:33.898052+00:00"
+      },
+      "error": {
+        "errno": null,
+        "message": "could not bind on any address out of [('127.0.0.1', 0)]",
+        "type": "OSError"
+      },
+      "samples": [],
+      "status": "error",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": true
+      }
+    },
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:34.052800+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": false
+      }
+    },
+    {
+      "backend": "asyncio",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "f17426993731ac8cfae3632dc43e778790e6b102",
+        "git_dirty": true,
+        "harness_sha256": "21d9619b797192f9109ec45dc29042e9c623ba33b65f684a5e63c09101bd3f83",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T06:58:34.204571+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": true
+      }
+    }
+  ],
+  "schema_version": 1
+}
