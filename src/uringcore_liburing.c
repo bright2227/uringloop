@@ -16,6 +16,8 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
+#include "uringcore_protocol.h"
+
 typedef enum {
     URINGCORE_REQUEST_PREPARED = 0,
     URINGCORE_REQUEST_SUBMITTED,
@@ -4024,6 +4026,9 @@ PyInit__uringcore(void)
 {
     PyObject *module;
 
+    if (PyType_Ready(&UringCoreProtocolDispatcherType) < 0) {
+        return NULL;
+    }
     if (PyType_Ready(&UringCoreLoopCoreType) < 0) {
         return NULL;
     }
@@ -4048,6 +4053,13 @@ PyInit__uringcore(void)
         return NULL;
     }
 
+    if (PyModule_AddObjectRef(
+            module,
+            "ProtocolDispatcher",
+            (PyObject *)&UringCoreProtocolDispatcherType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
     if (PyModule_AddObjectRef(
             module,
             "LoopCore",
@@ -4090,7 +4102,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 12) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 13) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(
