@@ -162,6 +162,7 @@ class ProvidedBuffer:
     def release(self) -> None: ...
 
 class Ring:
+    def abandon_prepared(self, request: Request) -> None: ...
     def __init__(
         self,
         entries: int = 256,

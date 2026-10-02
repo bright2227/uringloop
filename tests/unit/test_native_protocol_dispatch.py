@@ -48,7 +48,7 @@ class RecordingProtocol(asyncio.Protocol):
 
 
 def test_protocol_dispatch_abi():
-    assert _uringcore.ABI_VERSION == 14
+    assert _uringcore.ABI_VERSION == 15
 
 
 def test_all_callbacks_forward_identity_and_result():

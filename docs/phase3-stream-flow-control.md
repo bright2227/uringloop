@@ -4,6 +4,21 @@ Branch: `feature/phase3-stream-flow-control`
 
 Depends on: `feature/phase3-native-stream-transports`.
 
+## Implementation checkpoint — 2026-10-02
+
+The native one-shot state machine now has 54 deterministic adversarial flow
+tests and lightweight review, including the concrete scheduling, producer and
+reentrant-completion fixes they exposed. ABI15 also provides unpublished
+stream-SQE abandonment as NOP for post-prepare registration allocation failure;
+it preserves final-completion identity and buffer ownership. No production
+default changes, merges or multishot enablement are included.
+
+Available test/sanitizer evidence is recorded in `phase3-progress.md`. The
+kernel e2e, cancellation/fd-reuse/full-signal stress and performance portions of
+this branch's exit remain open. This is a reviewed implementation checkpoint,
+not completion of the full validation gate. See `phase3-validation.md` before
+continuing to multishot receive.
+
 ## Deliverable and files
 
 Complete the native stream state machine before adding repeated receives.

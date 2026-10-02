@@ -64,6 +64,7 @@ async def echo_scenario(network, path, mode):
 
 @pytest.mark.parametrize("mode", ["python", "native"])
 @pytest.mark.parametrize("network", ["tcp", "unix"])
-def test_one_shot_native_and_oracle_preserve_large_payload_and_half_close(network, mode, tmp_path):
-    with asyncio.Runner(loop_factory=lambda: IoUringProactorEventLoop(transports=mode)) as runner:
+@pytest.mark.parametrize("debug", [False, True])
+def test_one_shot_native_and_oracle_preserve_large_payload_and_half_close(network, mode, debug, tmp_path):
+    with asyncio.Runner(loop_factory=lambda: IoUringProactorEventLoop(transports=mode), debug=debug) as runner:
         runner.run(asyncio.wait_for(echo_scenario(network, str(tmp_path / "echo.sock"), mode), timeout=15))

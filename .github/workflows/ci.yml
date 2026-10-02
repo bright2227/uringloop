@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
@@ -71,6 +72,15 @@ jobs:
 
       - name: Build instrumented extensions and vendored liburing
         run: uv run python setup.py build_ext --inplace --force
+
+      - name: Run deterministic native transport and dispatch contracts
+        run: |
+          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
+            .venv/bin/python -m pytest \
+              tests/unit/test_native_protocol_dispatch.py \
+              tests/unit/test_native_stream_transport.py \
+              tests/unit/test_native_stream_flow_control.py \
+              tests/unit/test_native_transport_proactor.py -v
 
       - name: Run native ring tests
         run: |

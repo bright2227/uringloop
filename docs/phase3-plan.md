@@ -68,14 +68,18 @@ the stream-write safety correction before network hot-path optimization.
 
 - [x] Detailed feature-branch plan written in the original workspace.
 - [x] Phase 2 recovery handoff identified at reconstructed tip `f174269`.
-- [ ] Recovered Phase 2 build, safety and contract verification recorded.
+- [x] Recovered Phase 2 build and available deterministic verification recorded
+  in `RECOVERY.md`; missing raw evidence and kernel gates remain explicit.
 - [x] Transport contracts baseline/scaffold implemented and reviewed;
   kernel-dependent coverage remains outstanding.
 - [x] Stream-write correctness implemented and reviewed with deterministic
   socket, pipe and public API regressions; real I/O remains outstanding.
 - [x] Native protocol-dispatch helper implemented and reviewed as a scoped
   prerequisite; a dispatch helper alone is not a native transport.
-- [ ] Native TCP/Unix transport and lifecycle/flow-control branches reviewed.
+- [x] Native one-shot TCP/Unix implementation checkpoint reviewed; real-kernel
+  verification remains outstanding and native mode stays opt-in.
+- [x] Lifecycle/flow-control hardening implementation checkpoint reviewed; kernel gate remains
+  mandatory before multishot and integration approval.
 - [ ] Multishot receive and separate BufferedProtocol branch reviewed.
 - [ ] SEND_ZC, multishot accept and readiness branches reviewed.
 - [ ] UDP/pipe integration and preserved-path checks reviewed.

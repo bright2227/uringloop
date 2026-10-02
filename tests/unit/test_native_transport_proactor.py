@@ -42,6 +42,10 @@ class Ring:
         self.requests.append(cancellation)
         return cancellation
 
+    def abandon_prepared(self, request):
+        assert request.state == "prepared"
+        request.kind = "nop"
+
     def submit(self):
         for request in self.requests:
             if request.state == "prepared":
@@ -202,3 +206,125 @@ def test_transport_apis_reject_closed_proactor(proactor):
     ]:
         with pytest.raises(RuntimeError, match="closed"):
             method(*args)
+
+
+def test_transport_prepare_retries_full_sq_after_flushing_without_future(proactor, monkeypatch):
+    first = proactor.send_transport(object(), b"first", lambda completion: None)
+    original = proactor._ring.prepare_recv
+    calls = []
+
+    def prepare(file, buffer):
+        calls.append(first.state)
+        if len(calls) == 1:
+            raise BufferError("SQ full")
+        return original(file, buffer)
+
+    monkeypatch.setattr(proactor._ring, "prepare_recv", prepare)
+    second = proactor.recv_transport(object(), bytearray(4), lambda completion: None)
+    assert calls == ["prepared", "submitted"]
+    assert second in proactor._cache
+    assert proactor._cache[second].future is None
+
+
+def test_cancel_prepare_failure_keeps_request_and_exported_buffer_until_final(proactor, monkeypatch):
+    seen = []
+    payload = bytearray(b"owned")
+    request = proactor.send_transport(object(), payload, seen.append)
+    error = OSError(errno.ENOMEM, "cancel prepare failed")
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr(proactor._ring, "prepare_cancel", fail)
+    with pytest.raises(OSError) as raised:
+        proactor.cancel_transport(request)
+    assert raised.value is error
+    assert request.state == "submitted"
+    assert request.buffer.obj is payload
+    assert request in proactor._transport_requests
+    assert proactor._cache[request].handler == seen.append
+    completion = SimpleNamespace(request=request, result=5, final=True)
+    proactor._handle_completion(completion)
+    assert seen == [completion]
+    assert not proactor._cache
+
+
+def test_cancel_error_reports_request_without_retiring_original(proactor):
+    errors = []
+    proactor.set_loop(SimpleNamespace(call_exception_handler=errors.append))
+    request = proactor.recv_transport(object(), bytearray(4), lambda completion: None)
+    proactor.cancel_transport(request)
+    cancellation = proactor._ring.requests[-1]
+    proactor._handle_completion(SimpleNamespace(request=cancellation, result=-errno.EINVAL, final=True))
+    assert len(errors) == 1
+    assert errors[0]["request"] is request
+    assert errors[0]["exception"].errno == errno.EINVAL
+    assert request in proactor._cache
+    assert request in proactor._transport_requests
+    proactor._handle_completion(SimpleNamespace(request=request, result=-errno.ECANCELED, final=True))
+    assert not proactor._cache
+
+
+def test_reentrant_final_callback_can_prepare_next_request_without_stale_delivery(proactor):
+    seen = []
+    next_requests = []
+
+    def first_done(completion):
+        seen.append(completion)
+        next_requests.append(proactor.send_transport(object(), b"next", seen.append))
+
+    first = proactor.send_transport(object(), b"first", first_done)
+    completion = SimpleNamespace(request=first, result=5, final=True)
+    proactor._handle_completion(completion)
+    assert first not in proactor._cache
+    assert next_requests[0] in proactor._cache
+    proactor._handle_completion(completion)
+    assert seen == [completion]
+    final = SimpleNamespace(request=next_requests[0], result=4, final=True)
+    proactor._handle_completion(final)
+    assert seen == [completion, final]
+    assert not proactor._cache
+
+
+@pytest.mark.parametrize("failure_site", ["cache", "tracking"])
+def test_registration_failure_abandons_fd_sqe_before_error_returns(proactor, failure_site):
+    error = MemoryError("scripted registration allocation failure")
+
+    class FailingCache(dict):
+        def __setitem__(self, key, value):
+            raise error
+
+    class FailingTracking(set):
+        def add(self, key):
+            raise error
+
+    if failure_site == "cache":
+        proactor._cache = FailingCache()
+    else:
+        proactor._transport_requests = FailingTracking()
+    with pytest.raises(MemoryError) as raised:
+        proactor.send_transport(object(), b"owned", lambda completion: pytest.fail("abandoned callback"))
+    assert raised.value is error
+    [request] = proactor._ring.requests
+    assert request.kind == "nop"
+    assert request.state == "prepared"
+    assert proactor._pending_submit
+    assert not proactor._cache
+    assert not proactor._transport_requests
+    proactor._flush()
+    proactor._handle_completion(SimpleNamespace(request=request, result=0, final=True))
+    assert proactor._results == []
+
+
+def test_registration_record_allocation_failure_happens_before_prepare(proactor, monkeypatch):
+    error = MemoryError("scripted record allocation failure")
+
+    def fail(*args):
+        raise error
+
+    monkeypatch.setattr("uringloop.native_proactor._Pending", fail)
+    with pytest.raises(MemoryError) as raised:
+        proactor.send_transport(object(), b"owned", lambda completion: None)
+    assert raised.value is error
+    assert not proactor._ring.requests
+    assert not proactor._pending_submit

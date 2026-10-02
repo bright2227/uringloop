@@ -2712,6 +2712,48 @@ uringcore_liburing_ring_prepare_timeout(
 }
 
 static PyObject *
+uringcore_liburing_ring_abandon_prepared(
+    UringCoreLiburingRing *self, PyObject *object)
+{
+    UringCoreLiburingRequest *request;
+    unsigned int index;
+
+    if (!PyObject_TypeCheck(object, &UringCoreLiburingRequestType)) {
+        PyErr_SetString(PyExc_TypeError, "expected a native Request");
+        return NULL;
+    }
+    request = (UringCoreLiburingRequest *)object;
+    if (!self->initialized || self->waiting || request->ring != self ||
+        request->state != URINGCORE_REQUEST_PREPARED ||
+        (request->kind != URINGCORE_REQUEST_RECV &&
+         request->kind != URINGCORE_REQUEST_SEND)) {
+        PyErr_SetString(PyExc_ValueError, "expected a local prepared stream request");
+        return NULL;
+    }
+    for (index = self->ring.sq.sqe_head; index != self->ring.sq.sqe_tail; index++) {
+        unsigned int slot = index & self->ring.sq.ring_mask;
+        struct io_uring_sqe *sqe;
+
+        if (self->ring.flags & IORING_SETUP_SQE128) {
+            slot *= 2;
+        }
+        sqe = &self->ring.sq.sqes[slot];
+        if (sqe->user_data == (uint64_t)(uintptr_t)request) {
+            /* Do not unlink: the ring still owns the SQE/CQE identity. Replace
+             * its fd/buffer operation before the caller can close the socket.
+             * This recovery path must not allocate or submit any requests. */
+            io_uring_prep_nop(sqe);
+            io_uring_sqe_set_data(sqe, request);
+            request->kind = URINGCORE_REQUEST_NOP;
+            request->fd = -1;
+            Py_RETURN_NONE;
+        }
+    }
+    PyErr_SetString(PyExc_ValueError, "request is no longer in the local submission queue");
+    return NULL;
+}
+
+static PyObject *
 uringcore_liburing_ring_prepare_cancel(
     UringCoreLiburingRing *self,
     PyObject *args,
@@ -3787,6 +3829,12 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         PyDoc_STR("Prepare a relative timeout expressed in nanoseconds."),
     },
     {
+        "abandon_prepared",
+        (PyCFunction)uringcore_liburing_ring_abandon_prepared,
+        METH_O,
+        PyDoc_STR("Replace a local prepared stream SQE with NOP, retaining CQE ownership."),
+    },
+    {
         "prepare_cancel",
         _PyCFunction_CAST(uringcore_liburing_ring_prepare_cancel),
         METH_VARARGS | METH_KEYWORDS,
@@ -4113,7 +4161,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 14) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 15) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(

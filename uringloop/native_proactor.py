@@ -220,9 +220,22 @@ class NativeIoUringProactor:
     def _submit_transport(self, prepare: Callable[..., Any], conn: Any, buffer: Buffer, callback: Callable[[Any], None]):
         if not callable(callback):
             raise TypeError("transport completion callback must be callable")
+        # Allocate the GC-tracked record before prepare publishes an SQE.
+        pending = _Pending(None, conn, callback)
         request = self._prepare(prepare, conn, buffer)
-        self._register(request, None, conn, callback)
-        self._transport_requests.add(request)
+        self._pending_submit = True
+        try:
+            self._cache[request] = pending
+            self._transport_requests.add(request)
+        except BaseException:
+            # Dict/set growth can fail after prepare. An unregistered fd SQE
+            # must never survive the caller's subsequent socket cleanup. The
+            # native rollback changes it to NOP without allocating or releasing
+            # its CQE identity; the eventual unregistered completion is ignored.
+            self._ring.abandon_prepared(request)
+            self._cache.pop(request, None)
+            self._transport_requests.discard(request)
+            raise
         return request
 
     def recv_transport(self, conn: Any, buffer: Buffer, callback: Callable[[Any], None]):

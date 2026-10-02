@@ -29,7 +29,8 @@ Reviewed local branch checkpoints:
 | `feature/phase3-transport-contracts` | `03ef007` | Phase 2 `f174269` |
 | `feature/phase3-stream-write-correctness` | `8702ea2` | `03ef007` |
 | `feature/phase3-native-protocol-dispatch` | `276966b` | `8702ea2` |
-| `feature/phase3-native-stream-transports` | implementation checkpoint on this branch | dispatch/evidence tip `9b91baf` |
+| `feature/phase3-native-stream-transports` | `44d9bf6` | dispatch/evidence tip `9b91baf` |
+| `feature/phase3-stream-flow-control` | reviewed hardening checkpoint on this branch | `44d9bf6` |
 
 - Transport baseline: 18 deterministic lifecycle, flow-control, EOF,
   BufferedProtocol, exception and callback-context tests. Quick review found
@@ -51,36 +52,55 @@ Reviewed local branch checkpoints:
   isolation and unsupported/error results without synthetic timing samples.
   All review findings are fixed; 34 schema/framing/failure/selector regressions
   pass. `--transports native` independently selects the native stream path.
-- Native one-shot streams: ABI14 C state owns lifecycle, cached protocol
+- Native one-shot streams: introduced at ABI14, C state owns lifecycle, cached protocol
   callbacks, context, ordered writes, partial offsets and bounded read storage.
   The native proactor routes requests without per-operation Futures. A public
   asyncio Transport wrapper preserves protocol/server identity and sendfile
   fallback compatibility. Mutable writes are snapshotted; pending cancellation
   requests retain buffers until final completion. There are 32 native-state
-  and 10 routing regressions. Lightweight peer review fixes cover GC ownership,
+  and initially 10 routing regressions. Lightweight peer review fixes cover GC ownership,
   server detach, malformed completions and exactly-once cleanup.
 - Native streams are opt-in and use ordinary Protocol only. BufferedProtocol
   and initial TLS use the Python path; native `start_tls` is not supported.
   Write watermarks provide soft backpressure, not a hard output-memory cap.
-  Read retention is bounded to one 64 KiB one-shot buffer/pending payload.
-- Flow-control/lifecycle hardening, multishot receive/accept/poll, separate
-  direct BufferedProtocol receive and transport SEND_ZC remain pending.
+  Each stream retains one 64 KiB writable receive buffer and at most one
+  additional immutable pending payload of up to 64 KiB (plus object overhead).
+- Flow-control/lifecycle hardening: ABI15 checkpoint adds 54 adversarial
+  regressions covering exact high/low/zero boundaries, immediate limit changes,
+  three drain waiters with one cancelled, terminal actions inside every callback,
+  submission/cancel/SHUT_WR failure, bounded paused EOF, reentrant completion
+  getters, scheduler/exception-handler failure and six seeded Python-oracle
+  comparisons. Previously failing cases exposed stranded write producers,
+  nonterminal scheduling failures and stale result application; these are fixed.
+  Routing coverage grows to 17 cases, including allocation failures.
+- Registration allocation recovery allocates the GC-tracked record before
+  preparing its operation. If cache/set insertion fails, the new private
+  `Ring.abandon_prepared` converts its unpublished local fd SQE into NOP,
+  retaining CQE/buffer ownership until retirement. It cannot abandon submitted
+  operations. Real-kernel NOP retirement tests are added but remain unverified.
+- Final lightweight reviews of flow state and rollback found no new high/medium
+  findings. Review rerun: 124 focused tests pass. This is implementation review,
+  not kernel-validation or integration approval.
+- Multishot receive/accept/poll, separate direct BufferedProtocol receive and
+  transport SEND_ZC remain pending. Do not enable them before the one-shot
+  stream kernel gates pass.
 
 ## Verification so far
 
 Native/CFFI extensions built on CPython 3.12.3 and 3.13.7. On each interpreter,
-170 focused unit tests and 29 ring-independent native core/EventFD tests pass
-(199 checks per interpreter). The latter run explicitly deselects 55
+231 focused unit tests and 30 ring-independent native core/EventFD/guard tests pass
+(261 checks per interpreter). The latter run explicitly deselects 57
 ring-dependent tests; it is not a full e2e-suite pass. Ruff and diff checks
 pass for the new runtime and test files.
 
 `scripts/verify_wheel.py` verified the local extensions have no dynamic
-`liburing.so` dependency. The ABI14 wheel was also built, extracted into an
+`liburing.so` dependency. The ABI14 and final ABI15 wheels were built, extracted into
 isolated temporary directory, imported from outside the checkout and checked
 for the same dependencies. This is not a clean pip-installed wheel result
 (pip is unavailable here). The source distribution contains both native
-headers and stream modules.
-A separate ABI14 ASAN/UBSAN build passed 121 focused transport/dispatcher tests, with
+headers and stream modules. ABI15 import and `Ring.abandon_prepared` presence
+were verified from the isolated final wheel. Full-project Ruff checks pass.
+A separate ABI15 ASAN/UBSAN build passed 182 focused transport/dispatcher tests, with
 `ASAN_OPTIONS=detect_leaks=0`; this is not a kernel or leak-detector pass.
 
 The first nine local benchmark smoke attempts produced no successful measurements:
@@ -107,11 +127,19 @@ and the integrated performance matrix remain outstanding. No EPERM check is
 reported as a successful network benchmark. The Phase 3 uvloop-parity and
 release gates remain open.
 
+Full signal/fd-reuse stress remains outstanding. The allocation rollback does
+not establish that asynchronous signals cannot interrupt between the Python
+prepare/registration instructions; do not advertise that broader guarantee.
+The eight-case TCP/Unix × Python/native × debug on/off e2e matrix collects;
+collection is not a successful execution. CI includes deterministic native
+transport contracts under sanitizers and the real kernel gates separately.
+
 ## Next implementation phase
 
-Harden the integrated native one-shot lifecycle/flow control before enabling
-multishot receive. Use the detailed linear stack in `phase3-plan.md`; native
-implementation does not close the outstanding kernel-validation gate.
-Kernel-backed validation requires
-a runner where io_uring is permitted; do not change sandbox permissions or
-promote defaults to work around that prerequisite.
+Validate the reviewed one-shot stream/lifecycle checkpoints on an io_uring-
+capable Linux runner, then continue `feature/phase3-multishot-recv` from the
+flow-control branch. Commands and required evidence are in
+`phase3-validation.md`. Native implementation does not close the outstanding
+kernel-validation gate. Do not change sandbox permissions or promote defaults
+to work around that prerequisite. Current checkout stays on the hardening tip;
+later branches are planned, not represented as implemented or reviewed.

@@ -105,6 +105,19 @@ uringcore_stream_schedule(UringCoreStreamTransport *self, PyObject *callback)
 }
 
 static int
+uringcore_stream_schedule_failure(UringCoreStreamTransport *self)
+{
+    PyObject *error = PyErr_GetRaisedException();
+
+    /* No producer can make progress after ready scheduling fails. Close the
+     * fd and settle ownership before preserving the scheduling exception. */
+    uringcore_stream_finish(self, error, 1);
+    PyErr_Clear();
+    PyErr_SetRaisedException(error);
+    return -1;
+}
+
+static int
 uringcore_stream_schedule_read(UringCoreStreamTransport *self)
 {
     if (self->closed || self->closing || self->read_scheduled ||
@@ -114,7 +127,7 @@ uringcore_stream_schedule_read(UringCoreStreamTransport *self)
     self->read_scheduled = 1;
     if (uringcore_stream_schedule(self, self->read_callback) < 0) {
         self->read_scheduled = 0;
-        return -1;
+        return uringcore_stream_schedule_failure(self);
     }
     return 0;
 }
@@ -128,7 +141,7 @@ uringcore_stream_schedule_write(UringCoreStreamTransport *self)
     self->write_scheduled = 1;
     if (uringcore_stream_schedule(self, self->write_callback) < 0) {
         self->write_scheduled = 0;
-        return -1;
+        return uringcore_stream_schedule_failure(self);
     }
     return 0;
 }
@@ -594,10 +607,17 @@ uringcore_stream_connected(UringCoreStreamTransport *self, PyObject *Py_UNUSED(i
         }
         Py_DECREF(result);
     }
-    if (uringcore_stream_settle_waiter(self, NULL) < 0 ||
-        uringcore_stream_watermark(self) < 0 ||
-        uringcore_stream_schedule_read(self) < 0 ||
-        uringcore_stream_schedule_write(self) < 0) {
+    if (uringcore_stream_settle_waiter(self, NULL) < 0) {
+        if (uringcore_stream_fail_current(self, "Settling native stream connection waiter failed") < 0) {
+            return NULL;
+        }
+        Py_RETURN_NONE;
+    }
+    /* Publish producers before synchronous flow callbacks can stop the loop
+     * or propagate an exception. Restarting the loop can then make progress. */
+    if (uringcore_stream_schedule_read(self) < 0 ||
+        uringcore_stream_schedule_write(self) < 0 ||
+        uringcore_stream_watermark(self) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -761,13 +781,24 @@ uringcore_stream_completion_count(
 static PyObject *
 uringcore_stream_read_done(UringCoreStreamTransport *self, PyObject *completion)
 {
-    Py_ssize_t count;
+    PyObject *expected;
+    Py_ssize_t count = 0;
     int matched;
 
     if (self->closed || self->read_request == NULL) {
         Py_RETURN_NONE;
     }
-    matched = uringcore_stream_completion_count(completion, self->read_request, &count);
+    expected = Py_NewRef(self->read_request);
+    matched = uringcore_stream_completion_count(completion, expected, &count);
+    /* Completion attributes are native immutable getters in production, but
+     * defensive/private callers can reenter and retire this request while an
+     * attribute is read. Never apply its result to a newly armed request. */
+    if (self->closed || self->read_request != expected) {
+        Py_DECREF(expected);
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    Py_DECREF(expected);
     if (matched < 0) {
         if (uringcore_stream_fail_current(self, "Invalid native stream receive completion") < 0) {
             return NULL;
@@ -843,6 +874,13 @@ uringcore_stream_write_pump(UringCoreStreamTransport *self, PyObject *Py_UNUSED(
         Py_RETURN_NONE;
     }
     if (uringcore_stream_watermark(self) < 0) {
+        PyObject *error = PyErr_GetRaisedException();
+        /* A resume callback may have queued more bytes before propagating.
+         * Keep a producer for them even when the loop is stopped by the error. */
+        if (uringcore_stream_schedule_write(self) < 0) {
+            PyErr_Clear();
+        }
+        PyErr_SetRaisedException(error);
         return NULL;
     }
     if (self->closed || self->write_request != NULL) {
@@ -904,13 +942,21 @@ uringcore_stream_write_pump(UringCoreStreamTransport *self, PyObject *Py_UNUSED(
 static PyObject *
 uringcore_stream_write_done(UringCoreStreamTransport *self, PyObject *completion)
 {
-    Py_ssize_t count, remaining;
+    PyObject *expected;
+    Py_ssize_t count = 0, remaining;
     int matched;
 
     if (self->closed || self->write_request == NULL) {
         Py_RETURN_NONE;
     }
-    matched = uringcore_stream_completion_count(completion, self->write_request, &count);
+    expected = Py_NewRef(self->write_request);
+    matched = uringcore_stream_completion_count(completion, expected, &count);
+    if (self->closed || self->write_request != expected) {
+        Py_DECREF(expected);
+        PyErr_Clear();
+        Py_RETURN_NONE;
+    }
+    Py_DECREF(expected);
     if (matched < 0) {
         if (uringcore_stream_fail_current(self, "Invalid native stream send completion") < 0) {
             return NULL;
@@ -1018,7 +1064,7 @@ uringcore_stream_write(UringCoreStreamTransport *self, PyObject *data)
     }
     self->write_tail = entry;
     self->queued_bytes += PyBytes_GET_SIZE(payload);
-    if (uringcore_stream_watermark(self) < 0 || uringcore_stream_schedule_write(self) < 0) {
+    if (uringcore_stream_schedule_write(self) < 0 || uringcore_stream_watermark(self) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -1065,17 +1111,25 @@ uringcore_stream_close(UringCoreStreamTransport *self, PyObject *Py_UNUSED(ignor
             }
         }
         else {
+            PyObject *error = NULL;
             read_request = self->read_request;
             self->read_request = NULL;
             Py_CLEAR(self->read_buffer);
             Py_CLEAR(self->pending_read);
             self->pending_eof = 0;
             if (uringcore_stream_cancel(self, read_request) < 0) {
-                Py_XDECREF(read_request);
-                return NULL;
+                error = PyErr_GetRaisedException();
             }
             Py_XDECREF(read_request);
             if (uringcore_stream_schedule_write(self) < 0) {
+                if (error != NULL) {
+                    PyErr_Clear();
+                    PyErr_SetRaisedException(error);
+                }
+                return NULL;
+            }
+            if (error != NULL) {
+                PyErr_SetRaisedException(error);
                 return NULL;
             }
         }
