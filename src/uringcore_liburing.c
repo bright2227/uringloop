@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "uringcore_protocol.h"
+#include "uringcore_stream.h"
 
 typedef enum {
     URINGCORE_REQUEST_PREPARED = 0,
@@ -4029,6 +4030,9 @@ PyInit__uringcore(void)
     if (PyType_Ready(&UringCoreProtocolDispatcherType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&UringCoreStreamTransportType) < 0) {
+        return NULL;
+    }
     if (PyType_Ready(&UringCoreLoopCoreType) < 0) {
         return NULL;
     }
@@ -4057,6 +4061,13 @@ PyInit__uringcore(void)
             module,
             "ProtocolDispatcher",
             (PyObject *)&UringCoreProtocolDispatcherType) < 0) {
+        Py_DECREF(module);
+        return NULL;
+    }
+    if (PyModule_AddObjectRef(
+            module,
+            "StreamTransport",
+            (PyObject *)&UringCoreStreamTransportType) < 0) {
         Py_DECREF(module);
         return NULL;
     }
@@ -4102,7 +4113,7 @@ PyInit__uringcore(void)
         Py_DECREF(module);
         return NULL;
     }
-    if (PyModule_AddIntConstant(module, "ABI_VERSION", 13) < 0 ||
+    if (PyModule_AddIntConstant(module, "ABI_VERSION", 14) < 0 ||
         PyModule_AddIntConstant(module, "OP_NOP", IORING_OP_NOP) < 0 ||
         PyModule_AddIntConstant(module, "OP_TIMEOUT", IORING_OP_TIMEOUT) < 0 ||
         PyModule_AddIntConstant(

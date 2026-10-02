@@ -1,4 +1,4 @@
-from asyncio import base_events, events, futures, proactor_events, tasks, unix_events
+from asyncio import base_events, events, futures, proactor_events, protocols, tasks, unix_events
 from collections import deque
 from collections.abc import Buffer
 import errno
@@ -6,12 +6,14 @@ import io
 import os
 import socket
 import stat
+import sys
 import threading
 from typing import Any, cast
 
 from uringloop import _uringcore
 from uringloop.lib import POLLERR, POLLHUP, POLLIN
 from uringloop.log import logger
+from uringloop.native_proactor import NativeIoUringProactor
 from uringloop.proactor import IoUringProactor
 from uringloop.stream_transport import IoUringSocketTransport, _PartialWriteMixin
 
@@ -81,9 +83,35 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
     """Linux version of proactor event loop using IoUring."""
 
     def _make_socket_transport(self, sock, protocol, waiter=None, extra=None, server=None):
+        if getattr(self, "_transport_mode", "python") == "native" and not isinstance(protocol, protocols.BufferedProtocol):
+            from uringloop.native_stream import NativeStreamTransport
+
+            try:
+                return NativeStreamTransport(self, sock, protocol, waiter, extra, server)
+            except BaseException:
+                # A later native initialization failure may already have closed
+                # the socket. Preserve the original error if cleanup also fails.
+                try:
+                    if sock.fileno() != -1:
+                        sock.close()
+                except BaseException:
+                    pass
+                raise
         # Both proactors report the count from one kernel operation, unlike
         # CPython's Windows proactor's complete logical-write contract.
         return IoUringSocketTransport(self, sock, protocol, waiter, extra, server)
+
+    def _native_server_attach(self, server, transport):
+        if sys.version_info >= (3, 13):
+            server._attach(transport)
+        else:
+            server._attach()
+
+    def _native_server_detach(self, server, transport):
+        if sys.version_info >= (3, 13):
+            server._detach(transport)
+        else:
+            server._detach()
 
     def __init__(
         self,
@@ -94,10 +122,16 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         thread_wakeup: str = "socketpair",
         run_loop: str = "python",
         loop_core: str | None = None,
+        transports: str = "python",
     ):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
         self._closed = True
+        if transports not in {"python", "native"}:
+            raise ValueError("transports must be 'python' or 'native'")
+        if transports == "native" and proactor is not None and not isinstance(proactor, NativeIoUringProactor):
+            raise ValueError("native transports require the native io_uring proactor")
+        self._transport_mode = transports
         component_modes = (ready_queue, timer_heap, thread_wakeup, run_loop)
         phase1_modes = ("python", "python", "socketpair", "python")
         phase2_modes = ("native", "native", "eventfd", "native")

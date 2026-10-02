@@ -2,8 +2,9 @@
 """Verified Protocol/BufferedProtocol transport benchmark scaffolding.
 
 Run as ``python -m benchmarks.phase3``. Backend names select the ring and
-explicit Phase 2 opt-in from phase1; they do not select a native Phase 3
-transport. Actual transport classes are recorded from established connections.
+explicit Phase 2 opt-in from phase1. ``--transports native`` separately selects
+experimental one-shot stream transports with native ring backends only.
+Actual transport classes are recorded from established connections.
 Timing includes connection setup, payload verification, echo, and cleanup.
 """
 
@@ -42,10 +43,13 @@ class TransportWorkload:
     rounds: int
     slow_peer: bool = False
     peer_delay_us: int = 1000
+    transport_mode: str = "python"
 
     def __post_init__(self):
         if self.protocol not in PROTOCOLS or self.network not in NETWORKS:
             raise ValueError("unknown protocol or network")
+        if self.transport_mode not in {"python", "native"}:
+            raise ValueError("unknown transport implementation")
         if min(self.connections, self.message_size, self.rounds) < 1 or self.peer_delay_us < 0:
             raise ValueError("workload dimensions must be positive; peer delay cannot be negative")
         if self.slow_peer and self.peer_delay_us == 0:
@@ -284,7 +288,19 @@ def worker_result(backend, workload, warmup, repeats):
     loop = None
     result = None
     try:
-        loop = make_loop(backend)
+        if workload.transport_mode == "native":
+            if backend not in {"native", "native-phase2"}:
+                raise ValueError("native transports require a native ring backend")
+            from uringloop.loop import IoUringProactorEventLoop
+            from uringloop.proactor import IoUringProactor
+
+            loop = IoUringProactorEventLoop(
+                IoUringProactor(),
+                loop_core="phase2" if backend == "native-phase2" else "phase1",
+                transports="native",
+            )
+        else:
+            loop = make_loop(backend)
         asyncio.set_event_loop(loop)
         for _ in range(warmup):
             run_workload(loop, workload)
@@ -320,8 +336,13 @@ def worker_result(backend, workload, warmup, repeats):
             "selector_class": class_name(loop._selector) if hasattr(loop, "_selector") else None,
             "loop_core": getattr(loop, "_loop_core_mode", "external"),
             "transport_classes": sorted(transports),
+            "requested_transports": workload.transport_mode,
             "uringloop_transport_implementation": (
-                "python-counted-send" if "uringloop.stream_transport.IoUringSocketTransport" in transports else None
+                "native-one-shot"
+                if "uringloop.native_stream.NativeStreamTransport" in transports
+                else "python-counted-send"
+                if "uringloop.stream_transport.IoUringSocketTransport" in transports
+                else None
             ),
             "buffered_protocol_strategy": "application-staging-buffer" if workload.protocol == "buffered" else None,
         }
@@ -374,7 +395,7 @@ def worker_result(backend, workload, warmup, repeats):
     return result
 
 
-def matrix(profile):
+def matrix(profile, transport_mode="python"):
     if profile not in {"smoke", "full"}:
         raise ValueError("unknown benchmark profile")
     workloads = []
@@ -388,7 +409,10 @@ def matrix(profile):
                         for connections in (1, 64, 1000)
                         for size in (64, 4096, 262144)
                     ]
-                workloads.extend(TransportWorkload(protocol, network, *dimension, slow_peer) for dimension in dimensions)
+                workloads.extend(
+                    TransportWorkload(protocol, network, *dimension, slow_peer, transport_mode=transport_mode)
+                    for dimension in dimensions
+                )
     return workloads
 
 
@@ -404,6 +428,8 @@ def worker_command(backend, workload, warmup, repeats):
         workload.protocol,
         "--network",
         workload.network,
+        "--transports",
+        workload.transport_mode,
         "--connections",
         str(workload.connections),
         "--message-size",
@@ -477,6 +503,7 @@ def build_parser():
     parser.add_argument("--backends", nargs="+", choices=BACKENDS, default=["native", "cffi", "asyncio", "uvloop"])
     parser.add_argument("--protocol", choices=PROTOCOLS, default="protocol")
     parser.add_argument("--network", choices=NETWORKS, default="tcp")
+    parser.add_argument("--transports", choices=("python", "native"), default="python")
     parser.add_argument("--connections", type=int, default=1)
     parser.add_argument("--message-size", type=int, default=64)
     parser.add_argument("--rounds", type=int, default=2)
@@ -496,7 +523,14 @@ def main():
         parser.error("warmup cannot be negative; repeats must be positive")
     try:
         workload = TransportWorkload(
-            args.protocol, args.network, args.connections, args.message_size, args.rounds, args.slow_peer, args.peer_delay_us
+            args.protocol,
+            args.network,
+            args.connections,
+            args.message_size,
+            args.rounds,
+            args.slow_peer,
+            args.peer_delay_us,
+            args.transports,
         )
     except ValueError as error:
         parser.error(str(error))
@@ -517,7 +551,7 @@ def main():
             "environment": environment,
             "results": [
                 run_isolated(backend, item, args.warmup, args.repeats)
-                for item in matrix(args.profile)
+                for item in matrix(args.profile, args.transports)
                 for backend in args.backends
             ],
         }

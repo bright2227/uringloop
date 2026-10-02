@@ -100,6 +100,26 @@ def test_full_matrix_preserves_connection_and_payload_dimensions():
     assert all(item.operations == item.connections * item.rounds for item in workloads)
 
 
+def test_native_transport_selection_is_separate_from_ring_backend():
+    workloads = phase3.matrix("smoke", "native")
+    assert all(item.transport_mode == "native" for item in workloads)
+    command = phase3.worker_command("native-phase2", workloads[0], warmup=0, repeats=1)
+    args = phase3.build_parser().parse_args(command[3:])
+    assert args.transports == "native"
+    assert args.backend == "native-phase2"
+    assert phase3.build_parser().parse_args([]).transports == "python"
+
+
+@pytest.mark.parametrize("backend", ["cffi", "cffi-phase2", "asyncio", "uvloop"])
+def test_incompatible_native_transport_backend_fails_before_loop_allocation(monkeypatch, backend):
+    workload = phase3.TransportWorkload("protocol", "tcp", 1, 32, 1, transport_mode="native")
+    monkeypatch.setattr(phase3, "make_loop", lambda backend: pytest.fail("must validate before allocating a loop"))
+    result = phase3.worker_result(backend, workload, warmup=0, repeats=1)
+    assert result["status"] == "error"
+    assert result["samples"] == []
+    assert "native ring backend" in result["error"]["message"]
+
+
 @pytest.mark.parametrize("protocol", ["protocol", "buffered"])
 def test_echo_verifies_fragmented_and_coalesced_frames(no_io_loop, protocol):
     endpoint, transport, payloads, failures = make_echo(protocol)

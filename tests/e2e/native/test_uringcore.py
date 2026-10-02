@@ -19,7 +19,7 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 13
+    assert _uringcore.ABI_VERSION == 14
     assert _uringcore.EventFD.__module__ == "uringloop._uringcore"
     assert _uringcore.LoopCore.__module__ == "uringloop._uringcore"
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"

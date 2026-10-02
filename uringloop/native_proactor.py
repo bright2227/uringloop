@@ -44,6 +44,8 @@ class NativeIoUringProactor:
         self._cache: dict[Any, _Pending] = {}
         self._pending_submit = False
         self._stopped_serving: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._transports: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._transport_requests: set[Any] = set()
 
     def set_loop(self, loop: events.AbstractEventLoop):
         self._loop = loop
@@ -210,6 +212,52 @@ class NativeIoUringProactor:
             request = self._prepare(self._ring.prepare_write, conn, view, -1)
         return self._submit_native(request, conn, int)
 
+    def register_transport(self, transport: Any):
+        """Track native transports weakly for proactor shutdown."""
+        self._check_closed()
+        self._transports.add(transport)
+
+    def _submit_transport(self, prepare: Callable[..., Any], conn: Any, buffer: Buffer, callback: Callable[[Any], None]):
+        if not callable(callback):
+            raise TypeError("transport completion callback must be callable")
+        request = self._prepare(prepare, conn, buffer)
+        self._register(request, None, conn, callback)
+        self._transport_requests.add(request)
+        return request
+
+    def recv_transport(self, conn: Any, buffer: Buffer, callback: Callable[[Any], None]):
+        """Prepare one stream receive without an intermediate Future."""
+        self._check_closed()
+        return self._submit_transport(self._ring.prepare_recv, conn, buffer, callback)
+
+    def send_transport(self, conn: Any, buffer: Buffer, callback: Callable[[Any], None]):
+        """Prepare one counted stream send without an intermediate Future."""
+        self._check_closed()
+        return self._submit_transport(self._ring.prepare_send, conn, buffer, callback)
+
+    def cancel_transport(self, request: Any):
+        """Cancel a transport request, retaining its callback until retirement."""
+        self._check_closed()
+        if request not in self._transport_requests or request not in self._cache:
+            return
+        if request.state == "prepared":
+            self._flush()
+        try:
+            cancellation = self._prepare(self._ring.prepare_cancel, request)
+        except (RuntimeError, ValueError):
+            return
+
+        def cancellation_complete(completion: Any):
+            if completion.result >= 0 or completion.result == -errno.ENOENT:
+                return
+            error = OSError(-completion.result, os.strerror(-completion.result))
+            if self._loop is not None:
+                self._loop.call_exception_handler(
+                    {"message": "Cancelling a native transport request failed", "exception": error, "request": request}
+                )
+
+        self._register(cancellation, None, self._cache[request].file, cancellation_complete)
+
     def accept(self, listener: socket.socket):
         def action():
             connection, address = listener.accept()
@@ -325,6 +373,7 @@ class NativeIoUringProactor:
             return
         if completion.final:
             self._cache.pop(completion.request, None)
+            self._transport_requests.discard(completion.request)
         if pending.future is None:
             if pending.handler is not None:
                 pending.handler(completion)
@@ -358,7 +407,17 @@ class NativeIoUringProactor:
         if self._ring is None:
             return
         ring = self._ring
+        transport_error = None
         try:
+            for transport in list(self._transports):
+                try:
+                    close_transport = getattr(transport, "_close_for_loop", transport.abort)
+                    close_transport()
+                except BaseException as error:
+                    # Finish every owned transport and the ring before raising
+                    # the first shutdown failure; one callback cannot leak peers.
+                    if transport_error is None:
+                        transport_error = error
             for pending in list(self._cache.values()):
                 if pending.future is not None and not pending.future.done():
                     pending.future.cancel()
@@ -370,6 +429,10 @@ class NativeIoUringProactor:
             self._ring = None
             self._cache.clear()
             self._results = []
+            self._transport_requests.clear()
+            self._transports.clear()
+        if transport_error is not None:
+            raise transport_error
 
     def __del__(self):
         try:

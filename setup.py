@@ -21,7 +21,7 @@ EXTENSION_MODULES = [
     Extension(
             "uringloop._uringcore",
             sources=["src/uringcore_liburing.c"],
-            depends=["src/uringcore_protocol.h"],
+            depends=["src/uringcore_protocol.h", "src/uringcore_stream.h"],
     ),
 ]
 if os.environ.get(HANDLE_PROTOTYPES_ENVIRONMENT_VARIABLE) == "1":

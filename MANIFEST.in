@@ -8,6 +8,7 @@ include libs/liburing.spec
 include libs/src/Makefile
 include src/uringcore_liburing.c
 include src/uringcore_protocol.h
+include src/uringcore_stream.h
 include THIRD_PARTY_LICENSES/CPython-PSF-2.0.txt
 include THIRD_PARTY_LICENSES/liburing-MIT.txt
 recursive-include libs/src *.c
