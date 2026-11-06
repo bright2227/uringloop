@@ -44,3 +44,18 @@ validation notes above describe the original recovery, not remote merge status.
 Phase 2 remains opt-in through `loop_core="phase2"`; its controlled integrated
 performance gate and the two missing raw artifacts remain open. Phase 3 is
 published separately as an experimental dependent change.
+
+## Replacement evidence — 2026-11-06
+
+The two unrecovered historical files remain missing. New timer-heap and
+native-handle measurements are captured under `phase2-timer-heap-2026-11-06.json`
+and `phase2-native-handles-2026-11-06.json`. The report harness now uses these
+new samples together with the four preserved inputs. Its current index is
+`benchmarks/results/phase2-integration-2026-11-06.json`; the August index is
+unchanged and remains a historical record with two unavailable sources.
+
+New captures record their actual source commit, clean-tree flag, Python,
+kernel, timestamps, warmups, repetitions and individual samples. They are
+local component smoke measurements, not controlled integrated performance
+evidence. Tests check provenance and report arithmetic rather than requiring
+a performance win. No default or native-handle design decision is changed.

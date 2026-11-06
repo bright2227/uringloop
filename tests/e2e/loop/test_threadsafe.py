@@ -67,8 +67,9 @@ def test_eventfd_wakeup_coalesces_many_producers_without_losing_callbacks():
     assert completed == expected
 
 
-def test_eventfd_thread_wakeup_keeps_signal_socketpair_active():
-    loop = IoUringProactorEventLoop(thread_wakeup="eventfd")
+@pytest.mark.parametrize("options", [{"thread_wakeup": "socketpair"}, {"thread_wakeup": "eventfd"}, {"loop_core": "phase2"}])
+def test_eventfd_thread_wakeup_keeps_signal_socketpair_active(options):
+    loop = IoUringProactorEventLoop(**options)
     received = []
 
     def signal_received():
@@ -91,6 +92,32 @@ def test_eventfd_thread_wakeup_keeps_signal_socketpair_active():
         loop.close()
 
     assert received == [signal.SIGUSR1]
+
+
+def test_signal_handlers_require_main_thread_and_are_restored_on_close():
+    loop = IoUringProactorEventLoop(loop_core="phase2")
+    errors = []
+
+    def register_from_thread():
+        try:
+            loop.add_signal_handler(signal.SIGUSR1, lambda: None)
+        except RuntimeError as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=register_from_thread)
+    try:
+        thread.start()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert not loop._signal_handlers
+        loop.add_signal_handler(signal.SIGUSR1, lambda: None)
+        assert signal.getsignal(signal.SIGUSR1) != signal.SIG_DFL
+    finally:
+        loop.close()
+    assert signal.getsignal(signal.SIGUSR1) == signal.SIG_DFL
+    assert not loop._signal_handlers
+    loop.close()
 
 
 def test_eventfd_wakeup_after_close_uses_closed_loop_error():

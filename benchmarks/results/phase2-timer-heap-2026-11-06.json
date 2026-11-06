@@ -1,0 +1,140 @@
+{
+  "benchmark": "phase2-native-timer-heap",
+  "environment": {
+    "cpu_count": 8,
+    "executable": "/tmp/uringloop-phase-publication/.venv/bin/python",
+    "git_commit": "ac052e82782768ee685da04a26ba996b286f10b0",
+    "git_dirty": false,
+    "kernel": "6.18.54.1-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "platform": "Linux-6.18.54.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "timestamp_utc": "2026-11-06T14:54:07.797913+00:00"
+  },
+  "profile": "smoke",
+  "results": [
+    {
+      "backend": "native-core",
+      "measured_runs": 5,
+      "samples": [
+        {
+          "cancel_seconds": 5.31e-05,
+          "cpu_seconds": 0.0014849,
+          "expire_seconds": 0.0010495,
+          "insert_seconds": 0.0003888,
+          "operations_per_second": 2746412.766528094,
+          "wall_seconds": 0.0014914
+        },
+        {
+          "cancel_seconds": 6.31e-05,
+          "cpu_seconds": 0.0017388,
+          "expire_seconds": 0.0011588,
+          "insert_seconds": 0.000516299,
+          "operations_per_second": 2356462.062168946,
+          "wall_seconds": 0.001738199
+        },
+        {
+          "cancel_seconds": 5.96e-05,
+          "cpu_seconds": 0.0016363,
+          "expire_seconds": 0.001120099,
+          "insert_seconds": 0.000456,
+          "operations_per_second": 2504128.2045168458,
+          "wall_seconds": 0.001635699
+        },
+        {
+          "cancel_seconds": 6.34e-05,
+          "cpu_seconds": 0.0018835,
+          "expire_seconds": 0.001414099,
+          "insert_seconds": 0.0004032,
+          "operations_per_second": 2177913.6374294874,
+          "wall_seconds": 0.001880699
+        },
+        {
+          "cancel_seconds": 6.29e-05,
+          "cpu_seconds": 0.0016956,
+          "expire_seconds": 0.001180699,
+          "insert_seconds": 0.0004525,
+          "operations_per_second": 2414953.3724151715,
+          "wall_seconds": 0.001696099
+        }
+      ],
+      "summary": {
+        "cancel_seconds_median": 6.29e-05,
+        "cpu_seconds_median": 0.0016956,
+        "expire_seconds_median": 0.0011588,
+        "insert_seconds_median": 0.0004525,
+        "max_rss_kib": 24860,
+        "operations_per_second_median": 2414953.3724151715,
+        "wall_seconds_median": 0.001696099,
+        "wall_time_cv_percent": 8.43358517060788
+      },
+      "warmup_runs": 1,
+      "workload": {
+        "cancel_every": 2,
+        "operations": 4096
+      }
+    },
+    {
+      "backend": "python-heap",
+      "measured_runs": 5,
+      "samples": [
+        {
+          "cancel_seconds": 5.63e-05,
+          "cpu_seconds": 0.0031301,
+          "expire_seconds": 0.002416499,
+          "insert_seconds": 0.0006551,
+          "operations_per_second": 1309505.1982177175,
+          "wall_seconds": 0.003127899
+        },
+        {
+          "cancel_seconds": 5.9699e-05,
+          "cpu_seconds": 0.0040631,
+          "expire_seconds": 0.0031818,
+          "insert_seconds": 0.0008209,
+          "operations_per_second": 1008271.2210198949,
+          "wall_seconds": 0.004062399
+        },
+        {
+          "cancel_seconds": 7.17e-05,
+          "cpu_seconds": 0.0024938,
+          "expire_seconds": 0.001697399,
+          "insert_seconds": 0.000726,
+          "operations_per_second": 1641618.2283749061,
+          "wall_seconds": 0.002495099
+        },
+        {
+          "cancel_seconds": 8.17e-05,
+          "cpu_seconds": 0.0023809,
+          "expire_seconds": 0.001670199,
+          "insert_seconds": 0.0006292,
+          "operations_per_second": 1720214.0692176176,
+          "wall_seconds": 0.002381099
+        },
+        {
+          "cancel_seconds": 5.44e-05,
+          "cpu_seconds": 0.0026395,
+          "expire_seconds": 0.001930599,
+          "insert_seconds": 0.0006542,
+          "operations_per_second": 1551986.0381881017,
+          "wall_seconds": 0.002639199
+        }
+      ],
+      "summary": {
+        "cancel_seconds_median": 5.9699e-05,
+        "cpu_seconds_median": 0.0026395,
+        "expire_seconds_median": 0.001930599,
+        "insert_seconds_median": 0.0006551,
+        "max_rss_kib": 25000,
+        "operations_per_second_median": 1551986.0381881017,
+        "wall_seconds_median": 0.002639199,
+        "wall_time_cv_percent": 23.407684158251435
+      },
+      "warmup_runs": 1,
+      "workload": {
+        "cancel_every": 2,
+        "operations": 4096
+      }
+    }
+  ],
+  "schema_version": 1
+}

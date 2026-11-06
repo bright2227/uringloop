@@ -71,7 +71,7 @@ jobs:
           python-version: "3.12"
 
       - name: Build instrumented extensions and vendored liburing
-        run: uv run python setup.py build_ext --inplace --force
+        run: uv run --with 'setuptools>=78' python setup.py build_ext --inplace --force
 
       - name: Run deterministic native transport and dispatch contracts
         run: |

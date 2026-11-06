@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from benchmarks.ready_queue import ReadyQueueWorkload, backends_for, worker_resu
 from benchmarks.run_loop_tick import READY_BUDGET, TIMER_BUDGET, TickWorkload, worker_result as tick_worker_result
 from benchmarks.timer_heap import TimerHeapWorkload, worker_result as timer_heap_worker_result
 from scripts.compat_baseline import adaptation_methods_for_source, summarize, verify_adaptation_coverage
-from scripts.phase2_integration_report import ARTIFACTS, build_report
+from scripts.phase2_integration_report import ARTIFACTS, build_report, load_artifacts, percentage_change, result_for
 
 
 def test_full_benchmark_matrix_covers_phase_zero_dimensions():
@@ -191,11 +192,24 @@ def test_phase2_integration_index_reconciles_committed_artifacts():
         "workload_count": 6,
         "results_with_syscalls": 24,
     }
-    assert report["derived_metrics"]["timer_heap"]["throughput_change_percent"] > 100
+    documents = load_artifacts()
+    timer_native = result_for(documents["timer_heap"], "native-core")["summary"]
+    timer_python = result_for(documents["timer_heap"], "python-heap")["summary"]
+    assert report["derived_metrics"]["timer_heap"]["throughput_change_percent"] == percentage_change(
+        timer_native["operations_per_second_median"], timer_python["operations_per_second_median"]
+    )
     assert report["derived_metrics"]["ready_queue"]["loop_throughput_change_percent"] < 0
-    assert report["derived_metrics"]["native_handles"]["handle_wall_time_change_percent"] > 0
+    stock = result_for(documents["native_handles"], "stock-python", kind="handle")["summary"]
+    native = result_for(documents["native_handles"], "full-native-prototype", kind="handle")["summary"]
+    assert report["derived_metrics"]["native_handles"]["handle_wall_time_change_percent"] == percentage_change(
+        native["wall_seconds_median"], stock["wall_seconds_median"]
+    )
     assert report["derived_metrics"]["eventfd"]["comparison_available"] is False
     assert report["decision"]["default_loop_core"] == "phase1"
+    for source in report["source_artifacts"]:
+        path = Path(__file__).parents[2] / source["path"]
+        assert source["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert source["harness_commit"] == documents[source["name"]]["environment"]["git_commit"]
 
 
 def test_captured_phase2_integration_index_is_tied_to_report_harness():

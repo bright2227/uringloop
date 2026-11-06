@@ -1,4 +1,4 @@
-from asyncio import base_events, events, futures, proactor_events, protocols, tasks, unix_events
+from asyncio import base_events, events, exceptions, futures, proactor_events, protocols, tasks, unix_events
 from collections import deque
 from collections.abc import Buffer
 import errno
@@ -127,6 +127,7 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
         self._closed = True
+        self._signal_handlers = {}
         if transports not in {"python", "native"}:
             raise ValueError("transports must be 'python' or 'native'")
         if transports == "native" and proactor is not None and not isinstance(proactor, NativeIoUringProactor):
@@ -384,7 +385,45 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             self._native_tick_immediate = True
         handle = None
 
+    # Reuse CPython's Unix signal validation, registration and restoration.
+    # Signals use the byte-oriented self socket; thread wakeups may use eventfd.
+    add_signal_handler = unix_events._UnixSelectorEventLoop.add_signal_handler
+    remove_signal_handler = unix_events._UnixSelectorEventLoop.remove_signal_handler
+    _check_signal = unix_events._UnixSelectorEventLoop._check_signal
+    _handle_signal = unix_events._UnixSelectorEventLoop._handle_signal
+    _process_self_data = unix_events._UnixSelectorEventLoop._process_self_data
+
+    def _loop_self_reading(self, future=None):
+        try:
+            data = future.result() if future is not None else b""
+            if self._self_reading_future is not future:
+                return
+            self._process_self_data(data)
+            future = self._proactor.recv(self._ssock, 4096)
+        except exceptions.CancelledError:
+            return
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            self.call_exception_handler({
+                "message": "Error on reading from the event loop self pipe",
+                "exception": exc,
+                "loop": self,
+            })
+        else:
+            self._self_reading_future = future
+            future.add_done_callback(self._loop_self_reading)
+
     def close(self):
+        if self.is_running():
+            raise RuntimeError("Cannot close a running event loop")
+        if self.is_closed():
+            return
+        if sys.is_finalizing():
+            self._signal_handlers.clear()
+        else:
+            for sig in list(self._signal_handlers):
+                self.remove_signal_handler(sig)
         ready = self._ready
         wakeup = self._eventfd_wakeup
         if wakeup is not None:

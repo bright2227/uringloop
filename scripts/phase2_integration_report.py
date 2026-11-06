@@ -15,10 +15,10 @@ RESULTS = ROOT / "benchmarks/results"
 ARTIFACTS = {
     "contracts": "phase2-contracts-2026-08-10-wsl2.json",
     "ready_queue": "phase2-ready-queue-2026-08-10-wsl2.json",
-    "timer_heap": "phase2-timer-heap-2026-08-10-wsl2.json",
+    "timer_heap": "phase2-timer-heap-2026-11-06.json",
     "eventfd": "phase2-eventfd-wakeup-2026-08-10-wsl2.json",
     "native_tick": "phase2-native-tick-2026-08-10-wsl2.json",
-    "native_handles": "phase2-native-handles-2026-08-10-wsl2.json",
+    "native_handles": "phase2-native-handles-2026-11-06.json",
 }
 REVIEWED_BRANCH_TIPS = {
     "phase2-loop-contracts": "215059a",
@@ -147,7 +147,7 @@ def build_report(directory: Path = RESULTS) -> dict[str, Any]:
         },
         "integrated_matrix": {
             "local_status": "not_run",
-            "reason": "managed sandbox denies io_uring_setup and network socket creation with EPERM",
+            "reason": "this component evidence index does not run the controlled integrated matrix",
             "ci_backends": ["native-phase2", "native", "cffi-phase2", "cffi", "asyncio", "uvloop"],
         },
         "decision": {
