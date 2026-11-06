@@ -41,6 +41,7 @@ typedef struct {
     Py_ssize_t high_water;
     Py_ssize_t low_water;
     int initialized;
+    int ready;
     int connected;
     int closing;
     int closed;
@@ -69,7 +70,7 @@ uringcore_stream_public(UringCoreStreamTransport *self)
 static int
 uringcore_stream_check(UringCoreStreamTransport *self)
 {
-    if (!self->initialized || self->loop == NULL || self->dispatcher == NULL) {
+    if (!self->ready || self->loop == NULL || self->dispatcher == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "stream transport is not initialized");
         return -1;
     }
@@ -435,6 +436,7 @@ static int
 uringcore_stream_clear(UringCoreStreamTransport *self)
 {
     PyObject *saved_error = PyErr_GetRaisedException();
+    self->ready = 0;
     /* An unreachable transport must close its fd even when cached bound methods
      * form a cycle. Reachable requests retain their own exported buffers. */
     if (!self->closed && self->sock != NULL) {
@@ -495,6 +497,8 @@ uringcore_stream_init(UringCoreStreamTransport *self, PyObject *args, PyObject *
             &loop, &sock, &protocol, &waiter, &extra, &server, &owner)) {
         return -1;
     }
+    /* Block repeated/reentrant __init__ now, but expose no usable transport
+     * until every owned field and the initial callback are established. */
     self->initialized = 1;
     self->high_water = 64 * 1024;
     self->low_water = 16 * 1024;
@@ -570,11 +574,13 @@ uringcore_stream_init(UringCoreStreamTransport *self, PyObject *args, PyObject *
     if (uringcore_stream_schedule(self, self->made_callback) < 0) {
         goto failure;
     }
+    self->ready = 1;
     return 0;
 
 failure:
     {
         PyObject *error = PyErr_GetRaisedException();
+        self->ready = 0;
         uringcore_stream_finish(self, error, 0);
         PyErr_Clear();
         PyErr_SetRaisedException(error);
@@ -628,7 +634,7 @@ uringcore_stream_lost(UringCoreStreamTransport *self, PyObject *Py_UNUSED(ignore
 {
     PyObject *result, *error = NULL;
 
-    if (self->lost_called || self->dispatcher == NULL) {
+    if (!self->ready || self->lost_called || self->dispatcher == NULL) {
         Py_RETURN_NONE;
     }
     self->lost_called = 1;
@@ -1151,6 +1157,12 @@ uringcore_stream_close_for_loop(UringCoreStreamTransport *self, PyObject *Py_UNU
 {
     PyObject *error = NULL;
 
+    /* Registration may have exposed an object before later construction
+     * failed. Its failure cleanup already closed/detached it; shutdown must
+     * still tolerate that retained registration. */
+    if (self->initialized && !self->ready && self->closed) {
+        Py_RETURN_NONE;
+    }
     if (uringcore_stream_check(self) < 0) {
         return NULL;
     }
@@ -1202,7 +1214,7 @@ uringcore_stream_is_closing(UringCoreStreamTransport *self, PyObject *Py_UNUSED(
 static PyObject *
 uringcore_stream_is_reading(UringCoreStreamTransport *self, PyObject *Py_UNUSED(ignored))
 {
-    return PyBool_FromLong(!self->closing && !self->read_paused && !self->read_eof);
+    return PyBool_FromLong(self->ready && !self->closing && !self->read_paused && !self->read_eof);
 }
 
 static PyObject *

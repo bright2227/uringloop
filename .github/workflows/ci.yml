@@ -78,6 +78,7 @@ jobs:
           LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
             .venv/bin/python -m pytest \
               tests/unit/test_native_protocol_dispatch.py \
+              tests/unit/test_native_stream_initialization.py \
               tests/unit/test_native_stream_transport.py \
               tests/unit/test_native_stream_flow_control.py \
               tests/unit/test_native_transport_proactor.py -v

@@ -12,6 +12,18 @@ draft PR. Neither phase is represented as merged or performance approved.
 The original recovery checkout and unrelated Unix-test newline change remain
 preserved. Historical checkpoint hashes below refer to that recovery history.
 
+## Initialization-failure review follow-up — 2026-11-07
+
+Native transport construction now separates an attempted initialization from
+a successfully established state. Failed constructors leave methods guarded,
+prevent repeated initialization, and preserve idempotent shutdown for objects
+already exposed during registration. Successful closed transports retain
+their metadata. Nine regressions cover early and late constructor failures,
+an isolated child-process crash gate, and normal metadata after close.
+
+The full local Python 3.12 suite passes: **653 passed, 7 skipped**. CI's
+deterministic sanitizer step explicitly includes the new initialization tests.
+
 ## Request-lifetime review follow-up — 2026-11-06
 
 The two final-review fixes from the Phase 2 base are inherited here: native
