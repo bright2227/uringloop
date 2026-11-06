@@ -12,6 +12,24 @@ draft PR. Neither phase is represented as merged or performance approved.
 The original recovery checkout and unrelated Unix-test newline change remain
 preserved. Historical checkpoint hashes below refer to that recovery history.
 
+## Publication validation — 2026-11-06
+
+Both extensions build on CPython 3.12.3; Ruff and diff checks pass. The ten
+focused test files listed in `phase3-validation.md` pass: **234 tests**.
+
+The eight-case stream e2e matrix was run outside the managed sandbox with real
+io_uring and local socket access. Result: **6 passed, 2 failed**. All four
+native TCP/Unix cases and both Python Unix cases pass. Both Python TCP cases
+(debug off/on) time out in `server.wait_closed()` after the Python transport's
+connection-lost callback raises `OSError: [Errno 107] Transport endpoint is not
+connected` during shutdown. These failures remain open; the full Phase 3 suite,
+sanitizers, Python 3.13, and performance matrix were not rerun for publication.
+
+The Phase 2 base also has a failing signal-handler test and two missing
+historical raw benchmark files. See `phase2-publication-validation.md`.
+The dependent Phase 3 PR remains a draft; this run does not establish the
+complete one-shot validation gate or authorize multishot/SEND_ZC enablement.
+
 ## Recovered foundation
 
 Phase 2's six feature checkpoints have been reconstructed from recorded
