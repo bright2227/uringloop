@@ -78,3 +78,20 @@ class _PartialWriteMixin:
 
 class IoUringSocketTransport(_PartialWriteMixin, proactor_events._ProactorSocketTransport):
     """TCP/Unix transport with io_uring byte-count write semantics."""
+
+    def _call_connection_lost(self, exc):
+        if self._called_connection_lost:
+            return
+        self._called_connection_lost = True
+        try:
+            self._protocol.connection_lost(exc)
+        finally:
+            # Linux sockets can already be disconnected after peer EOF. Closing
+            # releases them without the Windows proactor's shutdown workaround.
+            try:
+                self._sock.close()
+            finally:
+                self._sock = None
+                server, self._server = self._server, None
+                if server is not None:
+                    server._detach()

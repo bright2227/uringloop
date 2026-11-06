@@ -264,7 +264,7 @@ def test_close_cancels_read_but_flushes_writes_before_connection_lost(transport_
 
     assert protocol.events == [("made",), ("lost", None)]
     assert sock.close_count == 1
-    assert sock.shutdowns == [socket.SHUT_RDWR]
+    assert sock.closed
     assert not harness.errors
 
 

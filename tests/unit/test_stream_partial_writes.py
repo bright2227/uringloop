@@ -108,6 +108,39 @@ def test_close_waits_for_partial_remainder_and_queued_data(stream_harness):
     assert sock.close_count == 1
 
 
+def test_disconnected_socket_cleanup_detaches_server_despite_protocol_failure(stream_harness):
+    harness = stream_harness
+    transport, protocol, sock = harness.make_transport()
+    harness.drain()
+    detached = []
+
+    class Server:
+        def _detach(self):
+            detached.append(True)
+
+    def disconnected_shutdown(how):
+        raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
+
+    def connection_lost(exc):
+        protocol.events.append(("lost", exc))
+        transport._call_connection_lost(exc)
+        raise RuntimeError("protocol cleanup failed")
+
+    sock.shutdown = disconnected_shutdown
+    protocol.connection_lost = connection_lost
+    transport._server = Server()
+    transport.close()
+    harness.drain()
+
+    assert sock.close_count == 1
+    assert transport._sock is None
+    assert transport._server is None
+    assert detached == [True]
+    assert protocol.events.count(("lost", None)) == 1
+    assert len(harness.errors) == 1
+    assert str(harness.errors[0]["exception"]) == "protocol cleanup failed"
+
+
 def test_write_eof_waits_for_partial_remainder_and_queued_data(stream_harness):
     harness = stream_harness
     transport, protocol, sock = harness.make_transport()
