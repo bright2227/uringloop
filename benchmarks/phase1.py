@@ -348,6 +348,9 @@ def environment_metadata() -> dict[str, Any]:
         "git_commit": subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=True
         ).stdout.strip(),
+        "git_dirty": bool(subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT, text=True, capture_output=True, check=True
+        ).stdout.strip()),
     }
 
 

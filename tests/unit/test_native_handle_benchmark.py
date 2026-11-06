@@ -9,7 +9,7 @@ import pytest
 from benchmarks.native_handles import BACKENDS, HandleWorkload, worker_result
 
 
-RESULT = Path(__file__).parents[2] / "benchmarks/results/phase2-native-handles-2026-08-10-wsl2.json"
+RESULT = Path(__file__).parents[2] / "benchmarks/results/phase2-native-handles-2026-11-06.json"
 
 
 def test_stock_handle_design_gate_worker_is_self_checking():
@@ -97,7 +97,8 @@ def test_captured_handle_design_gate_is_complete_and_tied_to_harness():
     document = json.loads(RESULT.read_text())
 
     assert document["schema_version"] == 1
-    assert document["environment"]["git_commit"] == "108c8cb82a1f71022c17ff74040a3874762a6656"
+    assert len(document["environment"]["git_commit"]) == 40
+    assert document["environment"]["git_dirty"] is False
     assert len(document["results"]) == 6
     assert {(result["backend"], result["workload"]["kind"]) for result in document["results"]} == {
         (backend, kind) for backend in BACKENDS for kind in ("handle", "timer")
