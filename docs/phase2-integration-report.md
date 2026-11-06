@@ -151,11 +151,14 @@ denied.
 from report harness commit `d3aefdb`. It records every reviewed predecessor
 tip, SHA-256 and harness commit for all six raw Phase 2 inputs, the 24-result
 contract baseline with syscall coverage, and derived arithmetic. The index is
-reproducible with:
+preserved as a historical index. Its two missing sources are documented in
+`RECOVERY.md`; they cannot be reproduced from the retained summaries. The
+current harness uses new 2026-11-06 captures for those components and produces
+a separate index with:
 
 ```bash
 python -m scripts.phase2_integration_report \
-  --output benchmarks/results/phase2-integration-2026-08-10-wsl2.json
+  --output benchmarks/results/phase2-integration-2026-11-06.json
 ```
 
 The derived smoke results are:
