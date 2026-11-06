@@ -19,6 +19,31 @@ passing cases. Controlled integrated performance approval remains open.
 
 ## Initial publication checkpoint
 
+## Request-lifetime review follow-up
+
+The final review reproduced two failures outside the original CI matrix:
+closing a ring from a retiring file object's finalizer crashed the process,
+and failed Future allocation left an unpublished send queued for a later
+unrelated submission. Both repros now pass.
+
+Native retirement detaches request ownership before invoking Python cleanup,
+prevents mutation while CQE storage is being examined, and returns the old
+completion batch when cleanup closes or replaces the ring. Resource release
+detaches exports and references first, and nested ring teardown is idempotent.
+
+Future and callback allocation precede SQE preparation. Registration failures
+replace only unpublished operations with NOPs and keep their identity/exports
+until retirement. Abandoning an unpublished cancellation restores its target
+so cancellation can be retried.
+
+The 32 new kernel regression cases pass, including child-process crash gates,
+Python buffer-release callbacks, ring replacement, nested teardown, and
+allocation failures in send, file-write, poll, and readiness registration.
+The full local Python 3.12 suite passes: **404 passed, 1 skipped**, with the
+optional benchmark prototypes built.
+
+## Initial publication checkpoint
+
 The publication branch includes recovered Phase 2 tip `f174269` and its
 unmerged Phase 1 prerequisites, with remote `main` at `c18dc43` merged in.
 The dependency security constraint and locked cryptography update are retained.
