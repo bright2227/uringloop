@@ -1,0 +1,284 @@
+{
+  "environment": {
+    "cpu_count": 8,
+    "executable": "/home/bright2227/uringloop/.venv/bin/python",
+    "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+    "git_dirty": true,
+    "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+    "kernel": "6.18.40.1-microsoft-standard-WSL2",
+    "machine": "x86_64",
+    "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "timestamp_utc": "2026-10-02T07:59:29.956870+00:00"
+  },
+  "measurement_scope": "connection-setup-verified-echo-and-cleanup",
+  "profile": "smoke",
+  "report": "phase3-transport-scaffold",
+  "results": [
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:30.071140+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": false,
+        "transport_mode": "native"
+      }
+    },
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:30.210391+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": true,
+        "transport_mode": "native"
+      }
+    },
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:30.343829+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": false,
+        "transport_mode": "native"
+      }
+    },
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:30.475127+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "protocol",
+        "rounds": 2,
+        "slow_peer": true,
+        "transport_mode": "native"
+      }
+    },
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:30.609596+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": false,
+        "transport_mode": "native"
+      }
+    },
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:30.744964+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "tcp",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": true,
+        "transport_mode": "native"
+      }
+    },
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:30.874445+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 64,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": false,
+        "transport_mode": "native"
+      }
+    },
+    {
+      "backend": "native",
+      "environment": {
+        "cpu_count": 8,
+        "executable": "/home/bright2227/uringloop/.venv/bin/python",
+        "git_commit": "9b91baf897bf60aeb0b06afce8139a28ae105f5d",
+        "git_dirty": true,
+        "harness_sha256": "f81a7bea24e9e828825ad97fdb14cf82d8ad6c75bcc9e7e9cde9917708cc9529",
+        "kernel": "6.18.40.1-microsoft-standard-WSL2",
+        "machine": "x86_64",
+        "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+        "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+        "timestamp_utc": "2026-10-02T07:59:31.013587+00:00"
+      },
+      "error": {
+        "errno": 1,
+        "message": "[Errno 1] Operation not permitted",
+        "type": "PermissionError"
+      },
+      "samples": [],
+      "status": "unsupported",
+      "summary": null,
+      "workload": {
+        "connections": 1,
+        "message_size": 262144,
+        "network": "unix",
+        "peer_delay_us": 1000,
+        "protocol": "buffered",
+        "rounds": 2,
+        "slow_peer": true,
+        "transport_mode": "native"
+      }
+    }
+  ],
+  "schema_version": 1
+}

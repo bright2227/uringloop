@@ -19,13 +19,46 @@ from uringloop import _uringcore
 
 
 def test_native_core_has_versioned_abi():
-    assert _uringcore.ABI_VERSION == 12
+    assert _uringcore.ABI_VERSION == 15
     assert _uringcore.EventFD.__module__ == "uringloop._uringcore"
     assert _uringcore.LoopCore.__module__ == "uringloop._uringcore"
     assert _uringcore.Ring.__module__ == "uringloop._uringcore"
     assert _uringcore.Request.__module__ == "uringloop._uringcore"
     assert _uringcore.Completion.__module__ == "uringloop._uringcore"
     assert _uringcore.ProvidedBuffer.__module__ == "uringloop._uringcore"
+
+
+def test_native_abandon_prepared_rejects_uninitialized_objects_without_ring_setup():
+    ring = _uringcore.Ring.__new__(_uringcore.Ring)
+    with pytest.raises(TypeError, match="Request"):
+        ring.abandon_prepared(None)
+
+
+@pytest.mark.parametrize("operation", ["recv", "send"])
+def test_native_abandon_prepared_stream_sqe_retires_as_nop_without_fd_access(operation):
+    ring = _uringcore.Ring(8)
+    left, right = socket.socketpair()
+    try:
+        payload = bytearray(b"retained")
+        request = getattr(ring, f"prepare_{operation}")(left, payload)
+        assert request.kind == operation
+        ring.abandon_prepared(request)
+        assert request.kind == "nop"
+        assert request.state == "prepared"
+        assert ring.pending == 1
+        left.close()
+        ring.submit()
+        [completion] = ring.wait(timeout_ns=1_000_000_000)
+        assert completion.request is request
+        assert completion.result == 0
+        assert completion.final
+        assert ring.pending == 0
+        right.setblocking(False)
+        assert right.recv(64) == b""
+    finally:
+        ring.close()
+        left.close()
+        right.close()
 
 
 def test_native_eventfd_coalesces_drains_and_owns_descriptor():

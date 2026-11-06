@@ -1,6 +1,6 @@
 # uringloop
 
-A Python implementation of a liburing-based proactor event loop for asyncio, designed to follow Python standard library conventions. The implementation is written primarily in pure Python, using CFFI only for wrapping the liburing interface.
+A liburing-based proactor event loop for asyncio, designed to follow Python standard library conventions. Native and CFFI ring backends are available; Python transports remain the default while native stream transports are experimental.
 
 - Implements a Proactor pattern similar to Windows' IOCP ([reference implementation](https://github.com/python/cpython/blob/d16f455cd8cabbc1e7bd2369cdb8718c30ab8957/Lib/asyncio/windows_events.py#L417))
 - Follows Python's standard asyncio implementation patterns
@@ -9,7 +9,7 @@ A Python implementation of a liburing-based proactor event loop for asyncio, des
 
 ## Goals
 
-- Provide a primarily Python (with CFFI, maybe C extension in future) implementation of a liburing-based event loop
+- Provide a liburing-based event loop with native hot paths and a retained Python/CFFI correctness baseline
 - Maintain full compatibility with standard asyncio APIs
 - Follow Python standard library implementation patterns
 
@@ -152,6 +152,27 @@ The default remains the Phase 1 Python scheduling path while the integrated
 Phase 2 matrix awaits a controlled io_uring-capable runner. `loop_core="phase1"`
 selects that retained oracle explicitly. The selector does not silently fall
 back when io_uring or eventfd setup is unavailable.
+
+Phase 3 also provides an independent experimental stream selector:
+
+```python
+asyncio.run(
+    main(),
+    loop_factory=lambda: IoUringProactorEventLoop(transports="native"),
+)
+```
+
+This selects native one-shot TCP/Unix transport state and direct request
+callbacks without a Future per read/write. It requires the native ring
+backend. Ordinary `Protocol` streams use this path; `BufferedProtocol` and
+initial SSL connections retain Python transports. Upgrading a native stream
+with `start_tls` is not supported yet. Pipes and datagrams are unchanged.
+`transports="python"` remains the default, independently of `loop_core`.
+
+Native streams have deterministic and sanitizer coverage, but real-kernel
+cancellation, networking and performance validation remain outstanding.
+Multishot receive/accept, direct BufferedProtocol receive and transport
+SEND_ZC are not enabled. See [Phase 3 progress](docs/phase3-progress.md).
 
 ## Contributing
 

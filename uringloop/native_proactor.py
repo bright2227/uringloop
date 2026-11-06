@@ -44,6 +44,8 @@ class NativeIoUringProactor:
         self._cache: dict[Any, _Pending] = {}
         self._pending_submit = False
         self._stopped_serving: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._transports: weakref.WeakSet[Any] = weakref.WeakSet()
+        self._transport_requests: set[Any] = set()
 
     def set_loop(self, loop: events.AbstractEventLoop):
         self._loop = loop
@@ -178,7 +180,39 @@ class NativeIoUringProactor:
 
     def _flush(self):
         if self._pending_submit:
-            self._ring.submit()
+            try:
+                self._ring.submit()
+            except BaseException as error:
+                # liburing publishes SQEs before entering the kernel. On an
+                # error, logically "prepared" requests may no longer be local
+                # and cannot be rewritten safely (especially with SQPOLL).
+                # Retire the entire ring BEFORE callbacks can close/reuse fds.
+                self._ring.close()
+                self._ring = None
+                self._pending_submit = False
+                while self._cache:
+                    _, pending = self._cache.popitem()
+                    if pending.future is not None and not pending.future.done():
+                        try:
+                            pending.future.set_exception(error)
+                        except BaseException:
+                            # A failing callback scheduler must not prevent
+                            # teardown of other owned operations/transports.
+                            pass
+                self._transport_requests.clear()
+                while self._transports:
+                    transport = self._transports.pop()
+                    try:
+                        # The failed ring cannot drive another loop tick. Force
+                        # native server detach now, not in a queued lost callback
+                        # that loop.close() may discard.
+                        close_transport = getattr(transport, "_close_for_loop", None)
+                        if close_transport is None:
+                            close_transport = transport.abort
+                        close_transport()
+                    except BaseException:
+                        pass
+                raise
             self._pending_submit = False
 
     def select(self, timeout: float | None = None):
@@ -224,6 +258,73 @@ class NativeIoUringProactor:
             return self._submit_native(self._ring.prepare_send, conn, int, view, flags)
         else:
             return self._submit_native(self._ring.prepare_write, conn, int, view, -1)
+
+    def register_transport(self, transport: Any):
+        """Track native transports weakly for proactor shutdown."""
+        self._check_closed()
+        self._transports.add(transport)
+
+    def _submit_transport(self, prepare: Callable[..., Any], conn: Any, buffer: Buffer, callback: Callable[[Any], None]):
+        if not callable(callback):
+            raise TypeError("transport completion callback must be callable")
+        # Allocate the GC-tracked record before prepare publishes an SQE.
+        pending = _Pending(None, conn, callback)
+        request = self._prepare(prepare, conn, buffer)
+        self._pending_submit = True
+        try:
+            self._cache[request] = pending
+            self._transport_requests.add(request)
+        except BaseException:
+            # Dict/set growth can fail after prepare. An unregistered fd SQE
+            # must never survive the caller's subsequent socket cleanup. The
+            # native rollback changes it to NOP without allocating or releasing
+            # its CQE identity; the eventual unregistered completion is ignored.
+            self._ring.abandon_prepared(request)
+            self._cache.pop(request, None)
+            self._transport_requests.discard(request)
+            raise
+        return request
+
+    def recv_transport(self, conn: Any, buffer: Buffer, callback: Callable[[Any], None]):
+        """Prepare one stream receive without an intermediate Future."""
+        self._check_closed()
+        return self._submit_transport(self._ring.prepare_recv, conn, buffer, callback)
+
+    def send_transport(self, conn: Any, buffer: Buffer, callback: Callable[[Any], None]):
+        """Prepare one counted stream send without an intermediate Future."""
+        self._check_closed()
+        return self._submit_transport(self._ring.prepare_send, conn, buffer, callback)
+
+    def cancel_transport(self, request: Any):
+        """Cancel a transport request, retaining its callback until retirement."""
+        if request.state == "released":
+            return
+        self._check_closed()
+        if request not in self._transport_requests or request not in self._cache:
+            return
+        if request.state == "prepared":
+            # Never submit an unpublished fd operation merely to cancel it.
+            # Submission may fail; the transport will still close the socket,
+            # and retrying that SQE later could target a reused numeric fd.
+            # Keep its identity/exports through final retirement as a safe NOP.
+            if request.kind != "nop":
+                self._ring.abandon_prepared(request)
+            return
+        try:
+            cancellation = self._prepare(self._ring.prepare_cancel, request)
+        except (RuntimeError, ValueError):
+            return
+
+        def cancellation_complete(completion: Any):
+            if completion.result >= 0 or completion.result == -errno.ENOENT:
+                return
+            error = OSError(-completion.result, os.strerror(-completion.result))
+            if self._loop is not None:
+                self._loop.call_exception_handler(
+                    {"message": "Cancelling a native transport request failed", "exception": error, "request": request}
+                )
+
+        self._register(cancellation, None, self._cache[request].file, cancellation_complete)
 
     def accept(self, listener: socket.socket):
         def action():
@@ -340,6 +441,7 @@ class NativeIoUringProactor:
             return
         if completion.final:
             self._cache.pop(completion.request, None)
+            self._transport_requests.discard(completion.request)
         if pending.future is None:
             if pending.handler is not None:
                 pending.handler(completion)
@@ -373,7 +475,17 @@ class NativeIoUringProactor:
         if self._ring is None:
             return
         ring = self._ring
+        transport_error = None
         try:
+            for transport in list(self._transports):
+                try:
+                    close_transport = getattr(transport, "_close_for_loop", transport.abort)
+                    close_transport()
+                except BaseException as error:
+                    # Finish every owned transport and the ring before raising
+                    # the first shutdown failure; one callback cannot leak peers.
+                    if transport_error is None:
+                        transport_error = error
             for pending in list(self._cache.values()):
                 if pending.future is not None and not pending.future.done():
                     pending.future.cancel()
@@ -385,6 +497,10 @@ class NativeIoUringProactor:
             self._ring = None
             self._cache.clear()
             self._results = []
+            self._transport_requests.clear()
+            self._transports.clear()
+        if transport_error is not None:
+            raise transport_error
 
     def __del__(self):
         try:

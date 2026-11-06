@@ -1,8 +1,8 @@
 # Roadmap: a native-core uringloop competitive with uvloop
 
-Status: Phase 2 branch stack complete; controlled integration approval is pending. Phase 3 remains planned work.
+Status: Phase 2 checkpoints recovered; controlled integration approval remains pending. Phase 3 native one-shot stream implementation is underway on an unmerged experimental branch stack. Kernel validation and later Phase 3 features remain pending; see `docs/phase3-progress.md`.
 
-Last updated: 2026-08-10
+Last updated: 2026-10-02
 
 ## Goal
 
