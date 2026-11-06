@@ -17,8 +17,6 @@ the optional handle benchmark prototypes built. Ruff and the CPython source
 verification/compatibility report pass; the compatibility report has 104
 passing cases. Controlled integrated performance approval remains open.
 
-## Initial publication checkpoint
-
 ## Request-lifetime review follow-up
 
 The final review reproduced two failures outside the original CI matrix:
@@ -41,6 +39,10 @@ Python buffer-release callbacks, ring replacement, nested teardown, and
 allocation failures in send, file-write, poll, and readiness registration.
 The full local Python 3.12 suite passes: **404 passed, 1 skipped**, with the
 optional benchmark prototypes built.
+
+The ASAN/UBSAN native and event-loop gates also pass: **182 passed, 1 skipped**,
+with leak detection disabled. The original crash repro exits normally, and
+the failed-allocation repro transmits only the subsequent successful payload.
 
 ## Initial publication checkpoint
 
