@@ -1,16 +1,16 @@
 # Phase 3 progress — 2026-10-02
 
-Phase 3 is in experimental foundation work, not complete. No branch has been
-merged or pushed by this work. The working stack is in the durable independent checkout
-`/home/bright2227/uringloop/recovered-phase2`, because the original checkout's
-Git metadata remains read-only. The original unrelated Unix-test newline
-change is preserved and excluded from task commits.
+Phase 3 is in experimental foundation work, not complete. The original recovery
+and validation checkpoint below is dated 2026-10-02.
 
-The user has confirmed Phase 2 is already fixed and merged. The recovery notes
-below describe this local historical copy, not the current remote merge status.
-This Phase 3 checkout still needs comparison with the actual merged base;
-remote verification is blocked by GitHub DNS resolution here. The shutdown fix
-below is confined to new Phase 3 code and does not reopen Phase 2 work.
+Publication update, 2026-11-06: remote `main` was verified at `c18dc43` and does
+not contain the recovered Phase 2 stack. Phase 2 is published separately on
+`feature/phase2-native-loop`, including its missing Phase 1 prerequisites and
+the current remote dependency security update. `feature/phase3-native-transports`
+replays the seven Phase 3 commits on that publication base for a dependent
+draft PR. Neither phase is represented as merged or performance approved.
+The original recovery checkout and unrelated Unix-test newline change remain
+preserved. Historical checkpoint hashes below refer to that recovery history.
 
 ## Recovered foundation
 
