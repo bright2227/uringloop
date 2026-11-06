@@ -6,6 +6,7 @@ only a prefix. The observable wire must contain each input byte exactly once.
 
 import errno
 import socket
+import sys
 
 import pytest
 from test_phase3_transport_contracts import FakeSocket, RecordingProtocol, TransportHarness
@@ -115,8 +116,8 @@ def test_disconnected_socket_cleanup_detaches_server_despite_protocol_failure(st
     detached = []
 
     class Server:
-        def _detach(self):
-            detached.append(True)
+        def _detach(self, *args):
+            detached.append(args)
 
     def disconnected_shutdown(how):
         raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
@@ -135,7 +136,7 @@ def test_disconnected_socket_cleanup_detaches_server_despite_protocol_failure(st
     assert sock.close_count == 1
     assert transport._sock is None
     assert transport._server is None
-    assert detached == [True]
+    assert detached == [(transport,) if sys.version_info >= (3, 13) else ()]
     assert protocol.events.count(("lost", None)) == 1
     assert len(harness.errors) == 1
     assert str(harness.errors[0]["exception"]) == "protocol cleanup failed"

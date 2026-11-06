@@ -10,6 +10,7 @@ path.  See docs/phase3-stream-write-correctness.md.
 from asyncio import exceptions, proactor_events
 import errno
 import socket
+import sys
 
 
 class _PartialWriteMixin:
@@ -94,4 +95,7 @@ class IoUringSocketTransport(_PartialWriteMixin, proactor_events._ProactorSocket
                 self._sock = None
                 server, self._server = self._server, None
                 if server is not None:
-                    server._detach()
+                    if sys.version_info >= (3, 13):
+                        server._detach(self)
+                    else:
+                        server._detach()
