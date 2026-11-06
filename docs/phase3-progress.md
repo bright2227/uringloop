@@ -12,7 +12,21 @@ draft PR. Neither phase is represented as merged or performance approved.
 The original recovery checkout and unrelated Unix-test newline change remain
 preserved. Historical checkpoint hashes below refer to that recovery history.
 
-## Publication validation — 2026-11-06
+## CI follow-up — 2026-11-06
+
+The failures at the initial checkpoint below are fixed. Python socket
+transport cleanup closes disconnected Linux sockets without the Windows
+shutdown workaround and always detaches the server, including when the
+protocol's connection-lost callback raises or reenters cleanup. The existing
+eight-case TCP/Unix/native/Python/debug matrix is now included in a passing
+full Python 3.12 run: **612 passed, 7 skipped**. Ruff passes.
+
+The Phase 2 base now supports signal handlers and uses new, dated component
+benchmark evidence. Its historical missing files remain documented. Sanitizer
+builds explicitly supply setuptools. Performance approval and the remaining
+Phase 3 features are still open; passing CI does not establish uvloop parity.
+
+## Initial publication validation — 2026-11-06
 
 Both extensions build on CPython 3.12.3; Ruff and diff checks pass. The ten
 focused test files listed in `phase3-validation.md` pass: **234 tests**.
