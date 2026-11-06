@@ -12,6 +12,19 @@ draft PR. Neither phase is represented as merged or performance approved.
 The original recovery checkout and unrelated Unix-test newline change remain
 preserved. Historical checkpoint hashes below refer to that recovery history.
 
+## Request-lifetime review follow-up — 2026-11-06
+
+The two final-review fixes from the Phase 2 base are inherited here: native
+completion draining tolerates cleanup that closes or replaces the ring, and
+failed Future/registration allocation cannot leave an unintended fd operation
+queued. Phase 3 uses the shared unpublished-request rollback helper, including
+its cancellation-target restoration and completion-model reset.
+
+All 32 new kernel regression cases pass within the full suites. Local results
+are **644 passed, 7 skipped** on Python 3.12 and **643 passed, 8 skipped** on
+Python 3.13. The ASAN/UBSAN transport, kernel and event-loop gates pass with
+**335 passed, 1 skipped**, with leak detection disabled.
+
 ## CI follow-up — 2026-11-06
 
 The failures at the initial checkpoint below are fixed. Python socket
