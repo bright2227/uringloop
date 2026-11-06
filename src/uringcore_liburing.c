@@ -148,6 +148,8 @@ struct UringCoreLiburingRing {
     unsigned int buffers_available;
     unsigned int buffers_in_use;
     int waiting;
+    int reaping;
+    int closing;
 };
 
 static PyTypeObject UringCoreLiburingRequestType;
@@ -1557,13 +1559,33 @@ static void
 uringcore_liburing_request_release_resources(
     UringCoreLiburingRequest *request)
 {
-    if (request->has_buffer) {
-        PyBuffer_Release(&request->buffer);
-        request->has_buffer = 0;
-        memset(&request->buffer, 0, sizeof(request->buffer));
+    Py_buffer buffer = request->buffer;
+    int has_buffer = request->has_buffer;
+    PyObject *file_object = request->file_object;
+    PyObject *cancel_target = request->cancel_target;
+
+    /* Detach every reference before a buffer callback or finalizer can reenter
+     * cleanup. Each resource must be released exactly once. */
+    request->has_buffer = 0;
+    memset(&request->buffer, 0, sizeof(request->buffer));
+    request->file_object = NULL;
+    request->cancel_target = NULL;
+    if (has_buffer) {
+        PyBuffer_Release(&buffer);
     }
-    Py_CLEAR(request->file_object);
-    Py_CLEAR(request->cancel_target);
+    Py_XDECREF(file_object);
+    Py_XDECREF(cancel_target);
+}
+
+static void
+uringcore_liburing_request_retire(UringCoreLiburingRequest *request)
+{
+    /* Unlink before invoking Python, with a temporary reference protecting
+     * requests that otherwise have only the ring's ownership reference. */
+    Py_INCREF(request);
+    uringcore_liburing_request_unlink(request);
+    uringcore_liburing_request_release_resources(request);
+    Py_DECREF(request);
 }
 
 static void
@@ -1571,6 +1593,10 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
 {
     UringCoreLiburingRequest *request;
 
+    if (self->closing) {
+        return;
+    }
+    self->closing = 1;
     if (self->initialized) {
         uringcore_liburing_ring_free_buffer_pool(self);
         self->cq_dropped = *self->ring.cq.koverflow;
@@ -1587,11 +1613,11 @@ uringcore_liburing_ring_close_resources(UringCoreLiburingRing *self)
         request->result = -ECANCELED;
         request->flags = 0;
         request->cancelled = 1;
-        uringcore_liburing_request_release_resources(request);
-        uringcore_liburing_request_unlink(request);
+        uringcore_liburing_request_retire(request);
     }
     self->pending = 0;
     self->prepared = 0;
+    self->closing = 0;
 }
 
 static int
@@ -2228,6 +2254,16 @@ uringcore_liburing_ring_new(
 }
 
 static int
+uringcore_liburing_ring_require_mutable(UringCoreLiburingRing *self)
+{
+    if (self->reaping || self->closing) {
+        PyErr_SetString(PyExc_RuntimeError, "ring is busy draining or releasing requests");
+        return -1;
+    }
+    return 0;
+}
+
+static int
 uringcore_liburing_ring_init(
     UringCoreLiburingRing *self,
     PyObject *args,
@@ -2253,6 +2289,9 @@ uringcore_liburing_ring_init(
     struct io_uring_params params;
     int result;
 
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return -1;
+    }
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
@@ -2394,6 +2433,12 @@ uringcore_liburing_ring_close(
     UringCoreLiburingRing *self,
     PyObject *Py_UNUSED(ignored))
 {
+    if (self->closing) {
+        Py_RETURN_NONE;
+    }
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return NULL;
+    }
     if (self->waiting) {
         PyErr_SetString(
             PyExc_RuntimeError,
@@ -2436,6 +2481,9 @@ uringcore_liburing_ring_setup_buffer_pool(
     int result;
     unsigned int index;
 
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return NULL;
+    }
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
@@ -2569,6 +2617,9 @@ uringcore_liburing_ring_get_sqe(UringCoreLiburingRing *self)
 {
     struct io_uring_sqe *sqe;
 
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return NULL;
+    }
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
         return NULL;
@@ -2722,12 +2773,13 @@ uringcore_liburing_ring_abandon_prepared(
         PyErr_SetString(PyExc_TypeError, "expected a native Request");
         return NULL;
     }
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return NULL;
+    }
     request = (UringCoreLiburingRequest *)object;
     if (!self->initialized || self->waiting || request->ring != self ||
-        request->state != URINGCORE_REQUEST_PREPARED ||
-        (request->kind != URINGCORE_REQUEST_RECV &&
-         request->kind != URINGCORE_REQUEST_SEND)) {
-        PyErr_SetString(PyExc_ValueError, "expected a local prepared stream request");
+        request->state != URINGCORE_REQUEST_PREPARED) {
+        PyErr_SetString(PyExc_ValueError, "expected a local prepared request");
         return NULL;
     }
     for (index = self->ring.sq.sqe_head; index != self->ring.sq.sqe_tail; index++) {
@@ -2739,12 +2791,20 @@ uringcore_liburing_ring_abandon_prepared(
         }
         sqe = &self->ring.sq.sqes[slot];
         if (sqe->user_data == (uint64_t)(uintptr_t)request) {
-            /* Do not unlink: the ring still owns the SQE/CQE identity. Replace
-             * its fd/buffer operation before the caller can close the socket.
-             * This recovery path must not allocate or submit any requests. */
+            /* Only unpublished SQEs may be rewritten. Keep the request and
+             * its exports alive until the harmless completion is retired. */
             io_uring_prep_nop(sqe);
             io_uring_sqe_set_data(sqe, request);
+            if (request->kind == URINGCORE_REQUEST_CANCEL &&
+                request->cancel_target != NULL) {
+                UringCoreLiburingRequest *target =
+                    (UringCoreLiburingRequest *)request->cancel_target;
+                if (target->state == URINGCORE_REQUEST_CANCEL_PENDING) {
+                    target->state = URINGCORE_REQUEST_SUBMITTED;
+                }
+            }
             request->kind = URINGCORE_REQUEST_NOP;
+            request->completion_model = URINGCORE_COMPLETION_ONE_SHOT;
             request->fd = -1;
             Py_RETURN_NONE;
         }
@@ -3193,6 +3253,9 @@ uringcore_liburing_ring_submit(
     unsigned long long generation;
     int result;
 
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return NULL;
+    }
     if (!self->initialized) {
         PyErr_SetString(PyExc_RuntimeError, "ring is closed");
         return NULL;
@@ -3341,7 +3404,7 @@ uringcore_liburing_ring_check_cq_dropped(UringCoreLiburingRing *self)
 }
 
 static PyObject *
-uringcore_liburing_ring_reap(
+uringcore_liburing_ring_reap_impl(
     UringCoreLiburingRing *self,
     PyObject *args,
     PyObject *kwargs)
@@ -3527,16 +3590,23 @@ uringcore_liburing_ring_reap(
         if (PyList_Append(completed, (PyObject *)completion) < 0) {
             Py_DECREF(completion);
             if (final) {
-                uringcore_liburing_request_release_resources(request);
-                uringcore_liburing_request_unlink(request);
+                self->reaping = 0;
+                uringcore_liburing_request_retire(request);
+                self->reaping = 1;
             }
             Py_DECREF(completed);
             return NULL;
         }
         Py_DECREF(completion);
         if (final) {
-            uringcore_liburing_request_release_resources(request);
-            uringcore_liburing_request_unlink(request);
+            /* The CQE has been consumed and the request will be unlinked
+             * before callbacks run. Teardown is safe at this boundary. */
+            self->reaping = 0;
+            uringcore_liburing_request_retire(request);
+            self->reaping = 1;
+            if (!self->initialized || self->generation != generation) {
+                return completed;
+            }
         }
         reaped++;
     }
@@ -3545,6 +3615,23 @@ uringcore_liburing_ring_reap(
         return NULL;
     }
     return completed;
+}
+
+static PyObject *
+uringcore_liburing_ring_reap(
+    UringCoreLiburingRing *self,
+    PyObject *args,
+    PyObject *kwargs)
+{
+    PyObject *result;
+
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return NULL;
+    }
+    self->reaping = 1;
+    result = uringcore_liburing_ring_reap_impl(self, args, kwargs);
+    self->reaping = 0;
+    return result;
 }
 
 static PyObject *
@@ -3571,6 +3658,9 @@ uringcore_liburing_ring_wait(
     int result;
     unsigned long long generation;
 
+    if (uringcore_liburing_ring_require_mutable(self) < 0) {
+        return NULL;
+    }
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
@@ -3811,6 +3901,12 @@ uringcore_liburing_ring_get_buffer_pool_bytes(
 
 static PyMethodDef uringcore_liburing_ring_methods[] = {
     {
+        "abandon_prepared",
+        (PyCFunction)uringcore_liburing_ring_abandon_prepared,
+        METH_O,
+        PyDoc_STR("Replace an unpublished request with NOP, retaining ownership until retirement."),
+    },
+    {
         "prepare_nop",
         (PyCFunction)uringcore_liburing_ring_prepare_nop,
         METH_NOARGS,
@@ -3827,12 +3923,6 @@ static PyMethodDef uringcore_liburing_ring_methods[] = {
         _PyCFunction_CAST(uringcore_liburing_ring_prepare_timeout),
         METH_VARARGS | METH_KEYWORDS,
         PyDoc_STR("Prepare a relative timeout expressed in nanoseconds."),
-    },
-    {
-        "abandon_prepared",
-        (PyCFunction)uringcore_liburing_ring_abandon_prepared,
-        METH_O,
-        PyDoc_STR("Replace a local prepared stream SQE with NOP, retaining CQE ownership."),
     },
     {
         "prepare_cancel",

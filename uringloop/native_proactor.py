@@ -72,16 +72,25 @@ class NativeIoUringProactor:
         file: object,
         handler: Callable[[Any], None] | None,
     ):
-        self._cache[request] = _Pending(future, file, handler)
-        if future is not None:
-            future._request = request
+        try:
+            self._cache[request] = _Pending(future, file, handler)
+            if future is not None:
+                future._request = request
+        except BaseException:
+            # Preparation already reserved an SQE. A failed Python allocation
+            # must not leave an fd operation for a later unrelated submission.
+            self._ring.abandon_prepared(request)
+            self._cache.pop(request, None)
+            self._pending_submit = True
+            raise
         self._pending_submit = True
 
     def _submit_native(
         self,
-        request: Any,
+        prepare: Callable[..., Any],
         file: object,
         result_builder: Callable[[int], Any],
+        *args: Any,
     ) -> _NativeFuture:
         future = self._new_future()
 
@@ -90,7 +99,11 @@ class NativeIoUringProactor:
                 raise OSError(-completion.result, os.strerror(-completion.result))
             return result_builder(completion.result)
 
-        self._register(request, future, file, lambda completion: self._resolve(future, complete, completion))
+        def handler(completion: Any):
+            self._resolve(future, complete, completion)
+
+        request = self._prepare(prepare, file, *args)
+        self._register(request, future, file, handler)
         return future
 
     def _resolve(self, future: _NativeFuture, callback: Callable[[Any], Any], value: Any):
@@ -115,8 +128,6 @@ class NativeIoUringProactor:
         mask: int,
         action: Callable[[], Any],
     ):
-        request = self._prepare(self._ring.prepare_poll, file, mask)
-
         def ready(completion: Any):
             if completion.result < 0:
                 raise OSError(-completion.result, os.strerror(-completion.result))
@@ -128,7 +139,11 @@ class NativeIoUringProactor:
             future.set_result(result)
             self._results.append(future)
 
-        self._register(request, future, file, lambda completion: self._resolve_readiness(future, ready, completion))
+        def handler(completion: Any):
+            self._resolve_readiness(future, ready, completion)
+
+        request = self._prepare(self._ring.prepare_poll, file, mask)
+        self._register(request, future, file, handler)
 
     def _resolve_readiness(
         self,
@@ -224,25 +239,25 @@ class NativeIoUringProactor:
     def recv(self, conn: socket.socket | IOBase, nbytes: int, flags: int = 0):
         buffer = bytearray(nbytes)
         if isinstance(conn, socket.socket):
-            request = self._prepare(self._ring.prepare_recv, conn, buffer, flags)
+            prepare = self._ring.prepare_recv
+            argument = flags
         else:
-            request = self._prepare(self._ring.prepare_read, conn, buffer, -1)
-        return self._submit_native(request, conn, lambda size: bytes(memoryview(buffer)[:size]))
+            prepare = self._ring.prepare_read
+            argument = -1
+        return self._submit_native(prepare, conn, lambda size: bytes(memoryview(buffer)[:size]), buffer, argument)
 
     def recv_into(self, conn: socket.socket | IOBase, buffer: Buffer, flags: int = 0):
         if isinstance(conn, socket.socket):
-            request = self._prepare(self._ring.prepare_recv, conn, buffer, flags)
+            return self._submit_native(self._ring.prepare_recv, conn, int, buffer, flags)
         else:
-            request = self._prepare(self._ring.prepare_read, conn, buffer, -1)
-        return self._submit_native(request, conn, int)
+            return self._submit_native(self._ring.prepare_read, conn, int, buffer, -1)
 
     def send(self, conn: socket.socket | IOBase, buffer: Buffer, flags: int = 0):
         view = memoryview(buffer)
         if isinstance(conn, socket.socket):
-            request = self._prepare(self._ring.prepare_send, conn, view, flags)
+            return self._submit_native(self._ring.prepare_send, conn, int, view, flags)
         else:
-            request = self._prepare(self._ring.prepare_write, conn, view, -1)
-        return self._submit_native(request, conn, int)
+            return self._submit_native(self._ring.prepare_write, conn, int, view, -1)
 
     def register_transport(self, transport: Any):
         """Track native transports weakly for proactor shutdown."""
@@ -390,8 +405,7 @@ class NativeIoUringProactor:
         return self._readiness_operation(sock, select.POLLOUT | select.POLLERR | select.POLLHUP, action)
 
     def poll_add(self, file: socket.socket | IOBase | int, poll_mask: int):
-        request = self._prepare(self._ring.prepare_poll, file, poll_mask)
-        return self._submit_native(request, file, int)
+        return self._submit_native(self._ring.prepare_poll, file, int, poll_mask)
 
     def _cancel_future(self, future: _NativeFuture):
         request = future._request
@@ -399,10 +413,6 @@ class NativeIoUringProactor:
             return
         if request.state == "prepared":
             self._flush()
-        try:
-            cancellation = self._prepare(self._ring.prepare_cancel, request)
-        except (RuntimeError, ValueError):
-            return
 
         def cancellation_complete(completion: Any):
             if completion.result >= 0 or completion.result == -errno.ENOENT:
@@ -418,7 +428,12 @@ class NativeIoUringProactor:
                 }
             )
 
-        self._register(cancellation, None, self._cache[request].file, cancellation_complete)
+        file = self._cache[request].file
+        try:
+            cancellation = self._prepare(self._ring.prepare_cancel, request)
+        except (RuntimeError, ValueError):
+            return
+        self._register(cancellation, None, file, cancellation_complete)
 
     def _handle_completion(self, completion: Any):
         pending = self._cache.get(completion.request)
