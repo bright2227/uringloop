@@ -32,3 +32,15 @@ on a suitable runner before using it for a new performance decision.
 Recovery scripts, source manifests, and artifact log locations are stored in
 the adjacent `phase3-recovery` directory. A Git bundle is stored there as a
 durable backup. No branch was merged or pushed during recovery.
+
+## Publication base — 2026-11-06
+
+Remote `main` at `c18dc43` does not contain the later Phase 1 request core or
+the recovered Phase 2 implementation. The Phase 2 publication branch includes
+those Phase 1 prerequisites and merges that remote base, preserving its
+cryptography constraint and dependency update. The recovery and historical
+validation notes above describe the original recovery, not remote merge status.
+
+Phase 2 remains opt-in through `loop_core="phase2"`; its controlled integrated
+performance gate and the two missing raw artifacts remain open. Phase 3 is
+published separately as an experimental dependent change.
