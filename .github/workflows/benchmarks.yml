@@ -1,0 +1,122 @@
+name: benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Workload matrix (full is intended for a controlled runner)
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+  schedule:
+    - cron: "17 3 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark-smoke:
+    name: Phase 1/2 benchmarks (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Prepare environment
+        uses: ./.github/actions/prepare
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run isolated Phase 1 workload matrix
+        run: |
+          uv sync --group dev --group benchmark
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python benchmarks/phase1.py \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --syscalls \
+            --output "artifacts/phase1-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Run isolated Phase 2 scheduling matrix
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python -m benchmarks.phase2 \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --syscalls \
+            --output "artifacts/phase2-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Run native ready-queue comparison
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python -m benchmarks.ready_queue \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-ready-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Run native timer-heap comparison
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python -m benchmarks.timer_heap \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-timers-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Run eventfd wakeup comparison
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python -m benchmarks.eventfd_wakeup \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-wakeup-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Run bounded native tick comparison
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python -m benchmarks.run_loop_tick \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-tick-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Run native handle design gate
+        env:
+          URINGLOOP_BUILD_HANDLE_PROTOTYPES: "1"
+        run: |
+          profile="${{ github.event.inputs.profile || 'smoke' }}"
+          uv run python setup.py build_ext --inplace --force
+          uv run python -m benchmarks.native_handles \
+            --profile "$profile" \
+            --warmup 1 \
+            --repeats 5 \
+            --output "artifacts/phase2-handles-${{ matrix.python-version }}-${profile}.json"
+
+      - name: Upload raw Phase 1 benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1-benchmark-${{ matrix.python-version }}
+          path: artifacts/phase1-${{ matrix.python-version }}-*.json
+
+      - name: Upload raw Phase 2 benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-scheduling-benchmark-${{ matrix.python-version }}
+          path: artifacts/phase2-${{ matrix.python-version }}-*.json

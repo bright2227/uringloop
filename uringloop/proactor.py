@@ -44,6 +44,7 @@ from uringloop.lib import (
     new_writable_sockaddr,
 )
 from uringloop.log import logger
+from uringloop.native_proactor import NativeIoUringProactor
 from uringloop.operation import (
     AcceptOperation,
     BaseOperation,
@@ -210,7 +211,7 @@ class _ProactorSubmit:
                 raise RuntimeError("io_uring made no progress submitting queued entries")
 
 
-class IoUringProactor:
+class _CffiIoUringProactor:
     """Proactor implementation using io uring."""
 
     def __init__(self, entries: int = DEFAULT_ENTRIES, flags: int = 0):
@@ -541,3 +542,9 @@ class IoUringProactor:
 
     def __del__(self):
         self.close()
+
+
+# Phase 1 promotes the native ring implementation while the former CFFI
+# submitter remains in this module as the behavioral oracle and for focused
+# differential unit tests during the transition.
+IoUringProactor = NativeIoUringProactor

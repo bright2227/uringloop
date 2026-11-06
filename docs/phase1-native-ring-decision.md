@@ -142,3 +142,52 @@ directory. The sdist includes only the source, internal headers, and build
 metadata needed for that archive. Both extension modules link the resulting
 archive, so a clean source build neither consumes a checkout artifact nor
 links a system `liburing.so`.
+
+## Sanitizer follow-up
+
+The sanitizer prerequisite is implemented by the
+`feature/phase1-native-sanitizers` branch. Setting
+`URINGLOOP_SANITIZERS=address,undefined` applies the same ASAN/UBSAN
+instrumentation to the native core, the CFFI extension, and the private
+vendored-liburing archive. CI builds those components from source and runs the
+real-kernel native ring tests and the event-loop e2e suites with both runtimes
+configured to stop on the first error.
+
+## Request-state follow-up
+
+The native ownership rules and cancellation race model are documented in the
+[Phase 1 request state machine](phase1-request-state-machine.md). The core
+returns immutable per-CQE completion snapshots and retains requests until the
+completion model identifies a final CQE, rather than releasing on the first
+CQE unconditionally.
+
+## CQ and probing follow-up
+
+Explicit CQ sizing, overflow visibility, dropped-CQE detection, and injectable
+runtime opcode probing are documented in
+[Phase 1 completion queues and runtime probing](phase1-cq-and-probing.md).
+
+## Provided-buffer follow-up
+
+The bounded allocation, registration, accounting, and return rules are
+documented in the
+[Phase 1 provided-buffer pool](phase1-provided-buffer-pool.md).
+
+## Native-operation follow-up
+
+Kernel-facing buffer ownership, multishot receive, explicit buffer return, and
+zero-copy notification lifetime are documented in
+[Phase 1 native operations](phase1-native-operations.md).
+
+## Proactor-integration follow-up
+
+The public proactor now batches submission and completion through the native
+ring. Its compatibility boundary and the intentionally retained CFFI oracle
+are documented in
+[Phase 1 proactor integration](phase1-proactor-integration.md).
+
+## Measurement follow-up
+
+The reproducible native/CFFI/stock-asyncio workload matrix, syscall method,
+measured smoke results, noise limits, and Phase 2 go decision are published in
+the [Phase 1 benchmark report](phase1-benchmark-report.md).

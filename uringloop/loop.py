@@ -1,15 +1,57 @@
-from asyncio import base_events, events, futures, proactor_events, tasks, unix_events
+from asyncio import base_events, events, exceptions, futures, proactor_events, tasks, unix_events
+from collections import deque
 from collections.abc import Buffer
 import errno
 import io
 import os
 import socket
 import stat
+import sys
+import threading
 from typing import Any, cast
 
+from uringloop import _uringcore
 from uringloop.lib import POLLERR, POLLHUP, POLLIN
 from uringloop.log import logger
 from uringloop.proactor import IoUringProactor
+
+
+class _NativeReadyQueue:
+    """Deque-compatible adapter backed by the native ready queue.
+
+    ``BaseEventLoop._run_once`` first reads the queue length and then calls
+    ``popleft`` that many times. The first pop snapshots the native queue into
+    one Python batch, so callbacks scheduled while that batch runs remain in
+    the native core until the next tick.
+    """
+
+    __slots__ = ("_batch", "_core")
+
+    def __init__(self, core=None):
+        self._core = _uringcore.LoopCore() if core is None else core
+        self._batch = deque()
+
+    def __len__(self):
+        return len(self._batch) + self._core.ready_count
+
+    def append(self, handle):
+        self._core.enqueue_ready(handle)
+
+    def popleft(self):
+        if not self._batch:
+            ready_count = self._core.ready_count
+            if ready_count == 0:
+                raise IndexError("pop from an empty deque")
+            self._batch.extend(self._core.take_ready_batch(ready_count))
+        return self._batch.popleft()
+
+    def clear(self):
+        self._batch.clear()
+        self._core.clear_ready()
+
+    def close(self):
+        self._batch.clear()
+        self._core.close()
 
 
 class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport):  # type: ignore[reportPrivateUsage]
@@ -38,14 +80,328 @@ class _IoUringWritePipeTransport(proactor_events._ProactorBaseWritePipeTransport
 class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
     """Linux version of proactor event loop using IoUring."""
 
-    def __init__(self, proactor: IoUringProactor | None = None):
+    def __init__(
+        self,
+        proactor: IoUringProactor | None = None,
+        *,
+        ready_queue: str = "python",
+        timer_heap: str = "python",
+        thread_wakeup: str = "socketpair",
+        run_loop: str = "python",
+        loop_core: str | None = None,
+    ):
         # BaseEventLoop.__del__ may run when constructing the default proactor
         # fails before the base initializer has set this field.
         self._closed = True
+        self._signal_handlers = {}
+        component_modes = (ready_queue, timer_heap, thread_wakeup, run_loop)
+        phase1_modes = ("python", "python", "socketpair", "python")
+        phase2_modes = ("native", "native", "eventfd", "native")
+        if loop_core not in {None, "phase1", "phase2"}:
+            raise ValueError("loop_core must be None, 'phase1', or 'phase2'")
+        if loop_core is not None and component_modes != phase1_modes:
+            raise ValueError("loop_core cannot be combined with component-level mode overrides")
+        if loop_core == "phase2":
+            ready_queue, timer_heap, thread_wakeup, run_loop = phase2_modes
+            component_modes = phase2_modes
+        if loop_core is not None:
+            self._loop_core_mode = loop_core
+        elif component_modes == phase1_modes:
+            self._loop_core_mode = "phase1"
+        elif component_modes == phase2_modes:
+            self._loop_core_mode = "phase2"
+        else:
+            self._loop_core_mode = "custom"
+        if ready_queue not in {"python", "native"}:
+            raise ValueError("ready_queue must be 'python' or 'native'")
+        if timer_heap not in {"python", "native"}:
+            raise ValueError("timer_heap must be 'python' or 'native'")
+        if timer_heap == "native" and ready_queue != "native":
+            raise ValueError("the native timer heap requires ready_queue='native'")
+        if thread_wakeup not in {"socketpair", "eventfd"}:
+            raise ValueError("thread_wakeup must be 'socketpair' or 'eventfd'")
+        if run_loop not in {"python", "native"}:
+            raise ValueError("run_loop must be 'python' or 'native'")
+        if run_loop == "native" and (ready_queue != "native" or timer_heap != "native"):
+            raise ValueError("the native run loop requires native ready and timer storage")
         if proactor is None:
             proactor = IoUringProactor()
         super().__init__(proactor)
         self._proactor: IoUringProactor
+        self._ready_queue_mode = ready_queue
+        self._timer_heap_mode = timer_heap
+        self._run_loop_mode = run_loop
+        self._timer_core = None
+        self._native_tick_batch = deque()
+        self._native_tick_immediate = False
+        self._native_cqe_budget = 256
+        self._native_timer_budget = 4096
+        self._native_ready_budget = 4096
+        self._thread_wakeup_mode = thread_wakeup
+        self._eventfd_wakeup = None
+        self._eventfd_poll_future = None
+        self._eventfd_closing = False
+        self._eventfd_poll_completions = 0
+        if ready_queue == "native":
+            if self._ready:
+                raise RuntimeError("cannot enable the native ready queue after scheduling callbacks")
+            core = _uringcore.LoopCore()
+            self._ready = _NativeReadyQueue(core)
+            if timer_heap == "native":
+                self._timer_core = core
+        if thread_wakeup == "eventfd":
+            try:
+                wakeup = _uringcore.EventFD()
+            except BaseException:
+                super().close()
+                raise
+            self._eventfd_wakeup = wakeup
+            try:
+                self._arm_eventfd_poll()
+            except BaseException:
+                self._eventfd_wakeup = None
+                wakeup.close()
+                super().close()
+                raise
+
+    def _arm_eventfd_poll(self):
+        if self._eventfd_closing or self._eventfd_wakeup is None:
+            return
+        if self._eventfd_poll_future is not None:
+            raise RuntimeError("eventfd wakeup poll is already armed")
+        future = self._proactor.poll_add(self._eventfd_wakeup, POLLIN)
+        self._eventfd_poll_future = future
+        future.add_done_callback(self._eventfd_poll_ready)
+
+    def _eventfd_poll_ready(self, future):
+        if future is not self._eventfd_poll_future:
+            return
+        self._eventfd_poll_future = None
+        if self._eventfd_closing:
+            return
+        if future.cancelled():
+            self._arm_eventfd_poll()
+            return
+        try:
+            future.result()
+            self._eventfd_poll_completions += 1
+            self._eventfd_wakeup.drain()
+            self._arm_eventfd_poll()
+        except BaseException as error:
+            wakeup = self._eventfd_wakeup
+            self._eventfd_wakeup = None
+            self._thread_wakeup_mode = "socketpair"
+            if wakeup is not None:
+                wakeup.close()
+            # Publication preceded the failed wakeup. Switch the producer path
+            # first, then wake the still-armed signal/socketpair reader so
+            # already-ready work cannot remain stranded behind a ring wait.
+            super()._write_to_self()
+            self.call_exception_handler(
+                {
+                    "message": "eventfd wakeup poll failed",
+                    "exception": error,
+                    "future": future,
+                }
+            )
+
+    def _write_to_self(self):
+        wakeup = self._eventfd_wakeup
+        if wakeup is None:
+            return super()._write_to_self()
+        try:
+            wakeup.notify()
+        except OSError:
+            if self._debug:
+                logger.debug("Fail to write eventfd wakeup", exc_info=True)
+
+    def call_at(self, when, callback, *args, context=None):
+        if self._timer_core is None:
+            return super().call_at(when, callback, *args, context=context)
+        if when is None:
+            raise TypeError("when cannot be None")
+        self._check_closed()
+        if self._debug:
+            self._check_thread()
+            self._check_callback(callback, "call_at")
+        timer = events.TimerHandle(when, callback, args, self, context)
+        if timer._source_traceback:
+            del timer._source_traceback[-1]
+        self._timer_core.schedule_timer(timer, when)
+        timer._scheduled = True
+        return timer
+
+    def _run_once(self):
+        if self._run_loop_mode == "native":
+            return self._run_once_native_tick()
+        if self._timer_core is None:
+            return super()._run_once()
+
+        core = self._timer_core
+        scheduled_count = core.timer_count
+        if (
+            scheduled_count > base_events._MIN_SCHEDULED_TIMER_HANDLES
+            and self._timer_cancelled_count / scheduled_count > base_events._MIN_CANCELLED_TIMER_HANDLES_FRACTION
+        ):
+            core.compact_timers()
+            self._timer_cancelled_count = 0
+
+        deadline = core.next_deadline()
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+        timeout = None
+        if self._ready or self._stopping:
+            timeout = 0
+        elif deadline is not None:
+            timeout = min(max(0, deadline - self.time()), base_events.MAXIMUM_SELECT_TIMEOUT)
+
+        event_list = self._selector.select(timeout)
+        self._process_events(event_list)
+        event_list = None
+
+        core.promote_due(self.time(), self._clock_resolution, 4096)
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+
+        ready_count = len(self._ready)
+        for _ in range(ready_count):
+            handle = self._ready.popleft()
+            if handle._cancelled:
+                continue
+            if self._debug:
+                try:
+                    self._current_handle = handle
+                    started = self.time()
+                    handle._run()
+                    elapsed = self.time() - started
+                    if elapsed >= self.slow_callback_duration:
+                        logger.warning(
+                            "Executing %s took %.3f seconds",
+                            base_events._format_handle(handle),
+                            elapsed,
+                        )
+                finally:
+                    self._current_handle = None
+            else:
+                handle._run()
+        handle = None
+
+    def _run_once_native_tick(self):
+        core = self._timer_core
+        scheduled_count = core.timer_count
+        if (
+            scheduled_count > base_events._MIN_SCHEDULED_TIMER_HANDLES
+            and self._timer_cancelled_count / scheduled_count > base_events._MIN_CANCELLED_TIMER_HANDLES_FRACTION
+        ):
+            core.compact_timers()
+            self._timer_cancelled_count = 0
+
+        immediate = bool(self._native_tick_batch) or self._stopping or self._native_tick_immediate
+        timeout = core.prepare_tick(self.time(), base_events.MAXIMUM_SELECT_TIMEOUT, immediate)
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+
+        select_batch = getattr(self._selector, "select_batch", None)
+        if select_batch is None:
+            event_list = self._selector.select(timeout)
+            completion_budget_exhausted = False
+        else:
+            event_list, completion_budget_exhausted = select_batch(timeout, self._native_cqe_budget)
+        self._process_events(event_list)
+        event_list = None
+
+        batch, storage_immediate, _ = core.finish_tick(
+            self.time(),
+            self._clock_resolution,
+            self._native_timer_budget,
+            self._native_ready_budget,
+        )
+        self._native_tick_batch.extend(batch)
+        if self._timer_cancelled_count:
+            self._timer_cancelled_count = core.cancelled_timer_count
+        dispatch_count = min(len(self._native_tick_batch), self._native_ready_budget)
+        self._native_tick_immediate = completion_budget_exhausted or storage_immediate
+
+        for _ in range(dispatch_count):
+            handle = self._native_tick_batch.popleft()
+            if handle._cancelled:
+                continue
+            if self._debug:
+                try:
+                    self._current_handle = handle
+                    started = self.time()
+                    handle._run()
+                    elapsed = self.time() - started
+                    if elapsed >= self.slow_callback_duration:
+                        logger.warning(
+                            "Executing %s took %.3f seconds",
+                            base_events._format_handle(handle),
+                            elapsed,
+                        )
+                finally:
+                    self._current_handle = None
+            else:
+                handle._run()
+        if self._native_tick_batch:
+            self._native_tick_immediate = True
+        handle = None
+
+    # Reuse CPython's Unix signal validation, registration and restoration.
+    # Signals use the byte-oriented self socket; thread wakeups may use eventfd.
+    add_signal_handler = unix_events._UnixSelectorEventLoop.add_signal_handler
+    remove_signal_handler = unix_events._UnixSelectorEventLoop.remove_signal_handler
+    _check_signal = unix_events._UnixSelectorEventLoop._check_signal
+    _handle_signal = unix_events._UnixSelectorEventLoop._handle_signal
+    _process_self_data = unix_events._UnixSelectorEventLoop._process_self_data
+
+    def _loop_self_reading(self, future=None):
+        try:
+            data = future.result() if future is not None else b""
+            if self._self_reading_future is not future:
+                return
+            self._process_self_data(data)
+            future = self._proactor.recv(self._ssock, 4096)
+        except exceptions.CancelledError:
+            return
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            self.call_exception_handler({
+                "message": "Error on reading from the event loop self pipe",
+                "exception": exc,
+                "loop": self,
+            })
+        else:
+            self._self_reading_future = future
+            future.add_done_callback(self._loop_self_reading)
+
+    def close(self):
+        if self.is_running():
+            raise RuntimeError("Cannot close a running event loop")
+        if self.is_closed():
+            return
+        if sys.is_finalizing():
+            self._signal_handlers.clear()
+        else:
+            for sig in list(self._signal_handlers):
+                self.remove_signal_handler(sig)
+        ready = self._ready
+        wakeup = self._eventfd_wakeup
+        if wakeup is not None:
+            self._eventfd_closing = True
+            future = self._eventfd_poll_future
+            self._eventfd_poll_future = None
+            if future is not None:
+                future.cancel()
+        try:
+            super().close()
+        finally:
+            if wakeup is not None:
+                self._eventfd_wakeup = None
+                wakeup.close()
+        self._native_tick_batch.clear()
+        if isinstance(ready, _NativeReadyQueue):
+            ready.close()
 
     def _run_forever_setup(self):
         assert self._self_reading_future is None
@@ -58,6 +414,22 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             self._self_reading_future.cancel()
             # TODO make sure https://github.com/python/cpython/blob/d16f455cd8cabbc1e7bd2369cdb8718c30ab8957/Lib/asyncio/windows_events.py#L328-L333
             self._self_reading_future = None
+
+    def run_forever(self):
+        # Python 3.14+ calls the setup/cleanup hooks above. Python 3.12 and
+        # 3.13 inline the run loop and therefore need the proactor self-read
+        # lifecycle here so call_soon_threadsafe can wake an idle ring wait.
+        if hasattr(super(), "_run_forever_setup"):
+            return super().run_forever()
+
+        assert self._self_reading_future is None
+        self.call_soon(self._loop_self_reading)
+        try:
+            return super().run_forever()
+        finally:
+            if self._self_reading_future is not None:
+                self._self_reading_future.cancel()
+                self._self_reading_future = None
 
     async def sock_sendall(self, sock: socket.socket | io.IOBase, data: Buffer):
         view = memoryview(data).cast("B")
@@ -193,7 +565,7 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
         self, protocol, args, shell, stdin, stdout, stderr, bufsize: int, extra=None, **kwargs
     ):
         waiter = self.create_future()
-        transp = unix_events._UnixSubprocessTransport(   # type: ignore[reportPrivateUsage]
+        transp = unix_events._UnixSubprocessTransport(  # type: ignore[reportPrivateUsage]
             self, protocol, args, shell, stdin, stdout, stderr, bufsize, waiter=waiter, extra=extra, **kwargs
         )
         self._watch_child(cast(int, transp.get_pid()), transp)
@@ -208,13 +580,31 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
 
         return transp
 
-    def _watch_child(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):   # type: ignore[reportPrivateUsage]
+    def _watch_child(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):  # type: ignore[reportPrivateUsage]
         """Reap the child through a pidfd polled by io_uring.
 
         This replaces the child watcher API, which was removed in Python 3.14.
+        Some portable CPython builds omit ``os.pidfd_open`` even on a new
+        enough Linux kernel, so retain a waitpid thread as a compatibility
+        fallback for those interpreters.
         """
-        pidfd = os.pidfd_open(pid)
-        fut: futures.Future[int] = self._proactor.poll_add(pidfd, POLLIN)
+        pidfd_open = getattr(os, "pidfd_open", None)
+        if pidfd_open is None:
+            self._start_waitpid_thread(pid, transp)
+            return
+
+        pidfd = None
+        try:
+            pidfd = pidfd_open(pid)
+            fut: futures.Future[int] = self._proactor.poll_add(pidfd, POLLIN)
+        except (OSError, RuntimeError):
+            if pidfd is not None:
+                try:
+                    os.close(pidfd)
+                except OSError:
+                    pass
+            self._start_waitpid_thread(pid, transp)
+            return
 
         def _child_exited(fut: futures.Future[int]):
             try:
@@ -235,6 +625,34 @@ class IoUringProactorEventLoop(proactor_events.BaseProactorEventLoop):
             self.call_soon(transp._process_exited, returncode)  # type: ignore[reportPrivateUsage]
 
         fut.add_done_callback(_child_exited)
+
+    def _start_waitpid_thread(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):  # type: ignore[reportPrivateUsage]
+        thread = threading.Thread(
+            target=self._waitpid_in_thread,
+            args=(pid, transp),
+            name=f"uringloop-waitpid-{pid}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _waitpid_in_thread(self, pid: int, transp: "unix_events._UnixSubprocessTransport"):  # type: ignore[reportPrivateUsage]
+        while True:
+            try:
+                _, status = os.waitpid(pid, 0)
+                returncode = os.waitstatus_to_exitcode(status)
+                break
+            except InterruptedError:
+                continue
+            except ChildProcessError:
+                returncode = 255
+                logger.warning("child process pid %d exit status already read: will report returncode 255", pid)
+                break
+
+        try:
+            self.call_soon_threadsafe(transp._process_exited, returncode)  # type: ignore[reportPrivateUsage]
+        except RuntimeError:
+            # The loop may have been closed while its child was still alive.
+            pass
 
     def _make_write_pipe_transport(self, sock, protocol, waiter=None, extra=None):
         return _IoUringWritePipeTransport(self, sock, protocol, waiter, extra)

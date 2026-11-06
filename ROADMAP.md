@@ -1,9 +1,8 @@
 # Roadmap: a native-core uringloop competitive with uvloop
 
-Status: draft for discussion — phases beyond the current baseline are not
-implemented yet.
+Status: Phase 2 branch stack complete; controlled integration approval is pending. Phase 3 remains planned work.
 
-Last updated: 2026-07-28
+Last updated: 2026-08-10
 
 ## Goal
 
@@ -128,6 +127,12 @@ before any percentage target is used as a gate.
 **Goal**: replace CFFI ring management while preserving the Python proactor
 API.
 
+**Status (2026-08-08)**: implementation and the Phase 1 correctness gates are
+complete. The [benchmark report](docs/phase1-benchmark-report.md) records the
+measured native/CFFI/stock-asyncio/uvloop comparison and approves proceeding to
+Phase 2; release performance claims still require the controlled full-profile
+run described in that report.
+
 - Add a native extension, initially named `_uringcore`, that owns SQ/CQ
   management. It must not require a system-installed liburing at runtime.
   Spike both viable implementation routes:
@@ -191,16 +196,26 @@ maintenance cost.
 **Goal**: replace the hottest `BaseProactorEventLoop` plumbing without
 prematurely porting rare APIs.
 
+**Status (2026-08-10)**: the reviewed native ready queue, timer heap, eventfd
+thread wakeup, and bounded native tick are available together through
+`loop_core="phase2"`. Stock asyncio handle types won their design gate and were
+retained. The Phase 1 scheduling path remains the public default because the
+managed local sandbox cannot run the controlled integrated io_uring/network
+matrix, and the isolated results do not establish absence of end-to-end
+regressions. Phase 3 is therefore not approved yet; see the
+[Phase 2 integration report](docs/phase2-integration-report.md).
+
 - Move the ready callback queue, timer heap, and hot handle operations into
   native code. Keep behavior identical in debug and non-debug modes.
 - Implement `call_soon_threadsafe` wakeups with an eventfd polled by the ring.
   `IORING_OP_MSG_RING` is only an optional optimization when the sending
   thread already owns a suitable source ring; it is not a general replacement
   for cross-thread wakeups.
-- Keep CPython's signal machinery and point `signal.set_wakeup_fd` at an
-  eventfd polled by io_uring. Do not use signalfd as the default: blocking
-  signals changes CPython signal semantics and can leak a blocked mask into
-  subprocesses.
+- Keep CPython's signal machinery on its byte-oriented socket/pipe wakeup fd.
+  Use eventfd only for cross-thread scheduling, because
+  `signal.set_wakeup_fd` writes one byte while eventfd accepts eight-byte
+  counter writes. Do not use signalfd as the default: blocking signals changes
+  CPython signal semantics and can leak a blocked mask into subprocesses.
 - Move the measured `run_forever` hot path into native code:
   submit/wait, drain CQEs, and run a bounded batch of ready callbacks.
 - Implement native `Handle` and `TimerHandle` storage only after their exact
