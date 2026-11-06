@@ -43,6 +43,7 @@ constraint-dependencies = ["cryptography>=49.0.0"]
 
 ## pytest
 [tool.pytest.ini_options]
+pythonpath = ["."]
 # the e2e tests drive a real event loop; a wedged loop should fail the
 # test instead of hanging CI forever
 timeout = 120
