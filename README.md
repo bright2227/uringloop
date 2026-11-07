@@ -9,9 +9,16 @@ A Python implementation of a liburing-based proactor event loop for asyncio, des
 
 ## Goals
 
-- Provide a primarily Python (with CFFI, maybe C extension in future) implementation of a liburing-based event loop
+- Provide a Python asyncio event loop with a small native ring/request backend as the Phase 1 target
 - Maintain full compatibility with standard asyncio APIs
 - Follow Python standard library implementation patterns
+
+The [roadmap](ROADMAP.md) prioritizes the I/O backend, asyncio compatibility,
+measurement, and usable releases while keeping scheduling and transports in
+Python. A native loop core (Phase 5) and native transports (Phase 6) are
+optional high-performance projects that need controlled benchmark evidence.
+See the [phase numbering map](docs/phase-numbering.md) for historical labels
+used by existing branches, reports, and experiments.
 
 ## Requirements
 

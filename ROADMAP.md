@@ -1,19 +1,40 @@
-# Roadmap: a native-core uringloop competitive with uvloop
+# Roadmap: a dependable io_uring event loop for asyncio
 
-Status: draft for discussion — phases beyond the current baseline are not
-implemented yet.
+Status: foundations, a small native I/O core, compatibility, and usable
+releases take priority. Native scheduling and native transports are the last
+two phases and are optional high-performance experiments.
 
-Last updated: 2026-07-28
+Last updated: 2026-11-07
+
+## Phase order
+
+| Phase | Focus | Role |
+|---|---|---|
+| 0 | Foundations: tests and reproducible benchmarks | Core |
+| 1 | Native ring and request core; Python loop and transports | Core |
+| 2 | Correctness and asyncio compatibility | Core |
+| 3 | Performance measurement and targeted tuning | Measure first; optimizations need evidence |
+| 4 | Packaging, documentation, and releases | Core |
+| 5 | Native loop core and scheduling | Optional high performance; formerly Phase 2 |
+| 6 | Native transports and protocol dispatch | Optional high performance; formerly Phase 3 |
+
+The baseline product can reach Phase 4 while retaining Python scheduling and
+transports. Phase 3 establishes measurements and can conclude that no tuning
+is justified; a speedup or uvloop parity is not a baseline release gate.
+Phases 5 and 6 require separate evidence and explicit opt-in.
+
+Historical phase numbers, branch names, API values, and evidence filenames
+are explained in the [phase numbering map](docs/phase-numbering.md).
 
 ## Goal
 
-Evolve uringloop from a pure-Python + CFFI proactor into an event loop whose
-hot paths run in native code on top of io_uring, with correctness,
-compatibility, and performance comparable to uvloop — and better than uvloop
-on workloads where io_uring has structural advantages, such as many small
-operations, file I/O, and zero-copy sends.
+Deliver a correct, installable Linux asyncio event loop backed by io_uring.
+The baseline keeps event-loop scheduling, proactor orchestration, and
+transports in Python, with a small C extension owning the ring and request
+resources. This follows the division used by CPython's Windows proactor:
+native I/O operations with Python asyncio plumbing.
 
-"Competitive with uvloop" is defined by three bars, in priority order:
+The baseline is judged by three bars, in priority order:
 
 1. **Correctness**: pass an adapted CPython asyncio test suite. This requires
    a maintained harness rather than simply running `test.test_asyncio`: much
@@ -29,20 +50,29 @@ operations, file I/O, and zero-copy sends.
    asyncio and uvloop. Performance claims must name the workload, kernel,
    Python version, CPU, concurrency, message size, and statistic.
 
+Competing with uvloop through native scheduling and transports is a separate
+optional objective in Phases 5 and 6. It must justify its maintenance cost
+with controlled measurements rather than expanding the amount of C code by
+default.
+
 ## Current baseline
 
-As of 2026-07-28, `main` already includes the first correctness and
-maintainability pass:
+As of 2026-11-07, remote `main` is at `adb0a7e`, which includes the revert of
+PR #23 through PR #25. The Python/CFFI proactor remains active, alongside the
+early `_uringcore` ring lifecycle and NOP submission/completion foundation.
+The reverted native request/proactor integration and native scheduling stack
+must not be counted as completed work on `main`.
 
-- request-owned CFFI resources and buffer-lifetime fixes;
-- fd-leak, partial-send, EINTR, cancellation, and `_stop_serving` fixes;
-- Python 3.14 child-watcher removal and pidfd-based subprocess handling;
-- batched SQE submission;
-- package metadata and CI matrix cleanup; and
-- a consistent Linux 5.19 minimum in both code and documentation.
+PR #24 remains open as experimental work with historical phase numbering.
+Its existence and passing branch checks do not make the baseline phases
+complete or authorize restoring all reverted prerequisites together.
+Baseline correctness fixes can be reviewed separately from optional native
+scheduling or transport implementations.
 
-These changes are the Phase 0 starting point, not pending roadmap work. Their
-behavior must be captured by regression tests before the native port begins.
+The immediate work is to establish the Phase 0 gates and finish Phase 1 in
+small steps, then complete baseline compatibility and release readiness.
+Phase numbers describe priorities, not a claim that every earlier exit gate
+has already passed.
 
 ## Why uvloop is fast, and what that implies
 
@@ -53,14 +83,15 @@ from three properties:
    much of the allocation and dispatch overhead of Python implementations.
 1. **Transports and protocol dispatch are native**: bytes arrive in a native
    buffer and `protocol.data_received` is invoked without an intermediate
-   stack of Python loop and transport frames. This is likely the largest
-   single opportunity for uringloop as well.
+   stack of Python loop and transport frames. This is a possible optimization
+   for uringloop that still needs profiling and measurement.
 1. **Correctness is a first-class deliverable**, backed by a mature test
    suite that includes behavior adapted from CPython.
 
-The implementation order is therefore based on what moves into native code:
-ring and ownership first, loop plumbing second, and transports third. Each
-phase must deliver value on its own.
+These properties motivate optional experiments, not the baseline
+implementation order. Ring ownership comes first; compatibility and usable
+releases follow with the Python loop and transports. Only measured bottlenecks
+justify the later native loop and transport phases.
 
 io_uring also has structural advantages over an epoll-backed design:
 
@@ -75,6 +106,11 @@ and a benchmark showing that it helps its intended workload.
 
 ## Guiding principles
 
+- **Keep the baseline small**: Python scheduling and transports remain the
+  reference architecture. Optional Phases 5 and 6 are separate decisions, not
+  prerequisites for completing compatibility or shipping a release.
+- **Safety applies to every retained path**: correctness and lifetime fixes
+  remain required even when the code under test is an optional experiment.
 - **Benchmark-driven**: no optimization merges without a number from the
   Phase 0 harness.
 - **Correctness before speed**: the CPython-derived suite and uringloop's e2e
@@ -128,6 +164,11 @@ before any percentage target is used as a gate.
 **Goal**: replace CFFI ring management while preserving the Python proactor
 API.
 
+Keep callback scheduling, timers, and transport logic in Python. Complete
+one-shot socket/file operations, polling, cancellation, and owned request
+lifetimes before considering advanced kernel features. The native loop and
+transport rewrites belong to optional Phases 5 and 6.
+
 - Add a native extension, initially named `_uringcore`, that owns SQ/CQ
   management. It must not require a system-installed liburing at runtime.
   Spike both viable implementation routes:
@@ -146,24 +187,26 @@ API.
 - Move request lifetimes into native structs. A request owns every
   kernel-referenced buffer, sockaddr, msghdr, and iovec.
 
-- Use a refcounted, multi-completion request state machine rather than
+- If multishot operations or `SEND_ZC` are enabled in a measured experiment,
+  use a refcounted, multi-completion request state machine rather than
   "release on the first CQE." At minimum it must model submitted,
   cancel-pending, operation-complete, notification-pending, and released
   states. `SEND_ZC` normally produces an operation CQE followed by a
   notification CQE, and asynchronous cancellation can race with a successful
   operation completion.
 
-- Add a bounded provided-buffer pool with explicit memory accounting and
-  backpressure. Be precise about copying:
+- Provided-buffer pools are optional kernel-feature work for Phases 3 or 6,
+  not a prerequisite for the one-shot baseline. When added, require bounded
+  memory accounting and backpressure. Be precise about copying:
 
   - the pool removes per-receive kernel-buffer allocation;
   - materializing `PyBytes` still allocates and copies; and
   - a memoryview-based path avoids that copy only if its ownership and return
     to the pool are explicit and safe.
 
-- Size the CQ explicitly for multishot workloads, detect overflow, drain
-  promptly, and test re-arming when the kernel terminates a multishot
-  operation by clearing `IORING_CQE_F_MORE`.
+- Size the CQ explicitly, detect overflow, and drain promptly. If multishot is
+  enabled, test re-arming when the kernel terminates an operation by clearing
+  `IORING_CQE_F_MORE`.
 
 - Expose a small, GIL-conscious batch API: prepare operations, submit once per
   loop tick, and reap a batch of completions in one native call.
@@ -176,20 +219,98 @@ API.
 - existing unit and e2e behavior stays green;
 - Linux wheels build and import without system liburing;
 - ASAN and UBSAN e2e runs are clean;
-- cancellation races, CQ pressure, multiple CQEs per request, buffer
-  exhaustion, and multishot re-arm paths are covered; and
+- cancellation races, CQ pressure, failed registration/initialization, and
+  reentrant resource cleanup are covered; advanced multi-CQE, buffer-pool,
+  and multishot paths have their own gates before being enabled; and
 - the benchmark report shows the measured effect on CPU, syscalls, and
   latency. A speedup is not assumed merely because CFFI was removed.
 
-**Go/no-go checkpoint**: do not replace the loop core until the native request
-state machine is demonstrably correct. If Phase 1 does not improve a relevant
-metric, retain it only if the packaging or safety benefit justifies its
-maintenance cost.
+**Go/no-go checkpoint**: require a demonstrably correct native request core
+before integration. A measured packaging or safety benefit can justify the
+small native backend even without a speedup. Passing Phase 1 does not approve
+optional Phase 5 scheduling or Phase 6 transports.
 
-## Phase 2 — native loop core
+## Phase 2 — correctness and compatibility completion
 
-**Goal**: replace the hottest `BaseProactorEventLoop` plumbing without
-prematurely porting rare APIs.
+**Goal**: make the baseline asyncio implementation dependable while keeping
+scheduling and transports in Python.
+
+- Bring the CPython-derived suite to the agreed pass target, with only
+  documented platform or deliberate-design skips.
+- Complete debug mode, slow-callback logging, exception-handler paths, signal
+  behavior, reactor APIs, and representative third-party compatibility tests.
+- Implement `add_reader` and `add_writer` using the ring's poll operations and
+  Python callback dispatch, including replacement/removal and cancellation
+  races. Native dispatch or multishot poll is a later optional optimization.
+- Cover partial and zero-progress writes, flow control, EOF, half-close,
+  cancellation, SSL/BufferedProtocol, pipes, UDP, and subprocess behavior in
+  the baseline. These correctness fixes do not depend on a native transport.
+- Detect an unavailable or seccomp-blocked io_uring setup at startup. Expose a
+  clear exception and an opt-in fallback mode; never silently run stock
+  asyncio when the caller believes uringloop is active.
+- Define the free-threaded Python stance:
+  - one ring per loop, with `SINGLE_ISSUER` used only when probed and justified;
+  - documented loop/thread affinity;
+  - synchronized cross-thread scheduling; and
+  - an explicit `Py_mod_gil` declaration backed by tests on a free-threaded
+    build.
+
+**Exit criteria**: the agreed compatibility target and supported-library
+checks pass for the baseline on each supported Python version, with clear
+platform limitations and no unresolved ownership or cancellation failures.
+
+## Phase 3 — performance measurement and targeted tuning
+
+**Goal**: measure the baseline and evaluate small optimizations independently.
+A reproducible baseline and a documented no-go decision are useful outcomes;
+this phase does not require a native scheduler or transport rewrite.
+
+- Evaluate io_uring features independently:
+  `IORING_SETUP_DEFER_TASKRUN`, `IORING_SETUP_COOP_TASKRUN`,
+  `IORING_SETUP_SINGLE_ISSUER`, registered files for hot sockets, registered
+  buffers, and zero-copy sends.
+- Keep any accepted tuning compatible with the Python scheduling/transport
+  baseline. Native scheduling, handle storage, and protocol dispatch belong
+  to optional Phases 5 and 6 and need their own bottleneck evidence.
+- Choose zero-copy thresholds empirically. `SEND_ZC` can still copy and always
+  adds lifetime/completion complexity; it is not expected to win for every
+  write size.
+- Gate every optimization on the Phase 0 methodology and publish regressions
+  as well as wins.
+
+**Exit criteria**: publish an auditable baseline, noise estimates, and the
+reason for accepting or deferring each experiment. A release can retain the
+untuned baseline if proposed optimizations do not justify their complexity.
+
+## Phase 4 — productization
+
+**Goal**: ship an installable, documented baseline without requiring either
+optional high-performance phase.
+
+- Build manylinux and musllinux wheels with cibuildwheel and no system
+  liburing dependency.
+- Default to per-Python-version wheels. Revisit abi3 only after the public
+  native API and free-threaded stance stabilize; Stable ABI availability of
+  vectorcall alone is not enough reason to commit to abi3.
+- Publish compatibility, kernel/container requirements, benchmark
+  methodology, benchmark results, and troubleshooting documentation.
+- Adopt semantic versioning and retain the pure-Python implementation as a
+  behavioral oracle until the native path is demonstrably mature.
+
+**Exit criteria**: source and wheel installation, supported-platform checks,
+documentation, and release validation pass. Every shipped path must meet its
+safety and compatibility gates; uvloop parity and enabling Phases 5 or 6 are
+not baseline release requirements.
+
+## Phase 5 — optional native loop core
+
+**Goal**: optionally replace measured scheduling bottlenecks in
+`BaseProactorEventLoop`, after the baseline is correct and usable.
+
+**Entry gate**: Phase 0 measurements identify a scheduling bottleneck worth
+the maintenance cost, and the baseline compatibility and release gates pass.
+Legacy Phase 2 implementations and benchmarks are reference experiments,
+not permission to make native scheduling the default.
 
 - Move the ready callback queue, timer heap, and hot handle operations into
   native code. Keep behavior identical in debug and non-debug modes.
@@ -197,10 +318,10 @@ prematurely porting rare APIs.
   `IORING_OP_MSG_RING` is only an optional optimization when the sending
   thread already owns a suitable source ring; it is not a general replacement
   for cross-thread wakeups.
-- Keep CPython's signal machinery and point `signal.set_wakeup_fd` at an
-  eventfd polled by io_uring. Do not use signalfd as the default: blocking
-  signals changes CPython signal semantics and can leak a blocked mask into
-  subprocesses.
+- Keep CPython signals on a byte-oriented socket/pipe wakeup fd. Eventfd is
+  only for thread scheduling: `signal.set_wakeup_fd` writes one byte, while
+  eventfd accepts eight-byte counter writes. Do not use signalfd as the
+  default, because blocking signals changes Python/subprocess semantics.
 - Move the measured `run_forever` hot path into native code:
   submit/wait, drain CQEs, and run a bounded batch of ready callbacks.
 - Implement native `Handle` and `TimerHandle` storage only after their exact
@@ -209,13 +330,21 @@ prematurely porting rare APIs.
 - Leave rare APIs such as `getaddrinfo` in Python until profiling justifies
   moving them.
 
-**Exit criteria**: the CPython-derived suite is at or above the Phase 0
-baseline, debug behavior remains correct, and the named scheduling benchmarks
-beat the stock loop beyond the measured noise floor.
+**Exit criteria**: compatibility and debug behavior remain at or above the
+baseline, and controlled scheduling benchmarks beat the retained Python
+path beyond measured noise without material end-to-end regressions. Keep
+the implementation opt-in until these gates justify promotion; otherwise
+defer it and retain Python scheduling.
 
-## Phase 3 — native transports and protocol dispatch
+## Phase 6 — optional native transports and protocol dispatch
 
-**Goal**: remove Python transport/proactor frames from the network hot path.
+**Goal**: optionally remove Python transport/proactor frames where controlled
+workloads demonstrate enough benefit to justify native lifecycle complexity.
+
+**Entry gate**: the baseline compatibility/release gates pass and profiling
+identifies transport overhead as a bottleneck. Evaluate transport changes
+against Python scheduling first; enabling Phase 5 is not a runtime
+prerequisite. Legacy Phase 3 work, including PR #24, remains experimental.
 
 - Implement TCP and Unix stream transports in native code:
   - multishot recv backed by a bounded provided-buffer ring;
@@ -226,17 +355,17 @@ beat the stock loop beyond the measured noise floor.
     notification CQE.
 - Implement multishot accept so connection setup does not require a new
   accept SQE for every connection.
-- Implement `add_reader` and `add_writer` with poll operations, including
-  replacement/removal semantics, cancellation races, and multishot
-  `IORING_CQE_F_MORE` handling.
+- Optionally optimize the reader/writer APIs completed in Phase 2 with native
+  dispatch or multishot poll, preserving replacement/removal and cancellation
+  semantics and handling `IORING_CQE_F_MORE` correctly.
 - Treat `BufferedProtocol` as a separate receive path. Its contract calls
   `get_buffer()` and writes into that returned buffer, while multishot recv
   requires kernel-selected provided buffers. Start with one-shot recv directly
   into `get_buffer()` followed by `buffer_updated()`. Do not claim a
   zero-copy combination with multishot provided buffers unless a safe design
   and benchmark demonstrate it.
-- Add UDP and pipe transports, then retain the existing splice-based sendfile
-  path.
+- Add native UDP and pipe transports only if justified, with the Python
+  transports retained as the baseline; preserve the existing sendfile path.
 - Decide the re-entrancy model before implementation. A protocol callback
   invoked during CQE draining may call `write`, `close`, or `loop.stop`.
   Either defer submissions/state transitions until the drain completes or
@@ -250,38 +379,11 @@ beat the stock loop beyond the measured noise floor.
 uvloop for the published workload matrix, while flow control, cancellation,
 EOF, half-close, and re-entrancy tests remain green.
 
-## Phase 4 — correctness and compatibility completion
+This is an optional performance-program target, not a release gate for the
+baseline product. Keep native transports opt-in until controlled results
+justify promotion, and publish regressions and no-go decisions as well as wins.
 
-- Bring the CPython-derived suite to the agreed pass target, with only
-  documented platform or deliberate-design skips.
-- Complete debug mode, slow-callback logging, exception-handler paths, signal
-  behavior, reactor APIs, and representative third-party compatibility tests.
-- Detect an unavailable or seccomp-blocked io_uring setup at startup. Expose a
-  clear exception and an opt-in fallback mode; never silently run stock
-  asyncio when the caller believes uringloop is active.
-- Define the free-threaded Python stance:
-  - one `IORING_SETUP_SINGLE_ISSUER` ring per loop;
-  - documented loop/thread affinity;
-  - synchronized cross-thread scheduling; and
-  - an explicit `Py_mod_gil` declaration backed by tests on a free-threaded
-    build.
-
-## Phase 5 — performance program
-
-- Evaluate io_uring features independently:
-  `IORING_SETUP_DEFER_TASKRUN`, `IORING_SETUP_COOP_TASKRUN`,
-  `IORING_SETUP_SINGLE_ISSUER`, registered files for hot sockets, registered
-  buffers, and zero-copy sends.
-- Evaluate native-side techniques independently: handle/request freelists,
-  vectorcall, cached protocol methods, and avoiding dict-based kwargs in hot
-  paths.
-- Choose zero-copy thresholds empirically. `SEND_ZC` can still copy and always
-  adds lifetime/completion complexity; it is not expected to win for every
-  write size.
-- Gate every optimization on the Phase 0 methodology and publish regressions
-  as well as wins.
-
-### Kernel feature matrix
+## Kernel feature matrix
 
 Runtime probes and setup results are authoritative; versions below indicate
 the upstream introduction point, not permission to assume a feature works in
@@ -304,18 +406,6 @@ the current container or environment.
 The project keeps Linux 5.19 as the support floor. Features introduced later
 must have probe-gated fallback paths.
 
-## Phase 6 — productization
-
-- Build manylinux and musllinux wheels with cibuildwheel and no system
-  liburing dependency.
-- Default to per-Python-version wheels. Revisit abi3 only after the public
-  native API and free-threaded stance stabilize; Stable ABI availability of
-  vectorcall alone is not enough reason to commit to abi3.
-- Publish compatibility, kernel/container requirements, benchmark
-  methodology, benchmark results, and troubleshooting documentation.
-- Adopt semantic versioning and retain the pure-Python implementation as a
-  behavioral oracle until the native path is demonstrably mature.
-
 ## Risks and honest notes
 
 - **Scale**: uvloop represents many years of native event-loop engineering
@@ -336,8 +426,9 @@ must have probe-gated fallback paths.
   io_uring. Deployment detection and an explicit fallback story are required.
 - **Multi-completion ownership**: multishot operations, zero-copy
   notifications, and asynchronous cancellation invalidate the current
-  one-user-data/one-CQE cache model. This is the principal correctness risk
-  and the Phase 1 critical path.
+  one-user-data/one-CQE cache model. Correct cancellation ownership is a
+  Phase 1 requirement; advanced multi-completion paths need their own safety
+  gates before they are enabled in later experiments.
 - **Ordering discipline**: benchmarks and ownership tests must precede
   large-scale native rewrites. Otherwise it will be impossible to distinguish
   faster code from changed semantics or newly introduced lifetime bugs.
@@ -345,6 +436,7 @@ must have probe-gated fallback paths.
 ## Non-goals
 
 - Windows or macOS support; io_uring is Linux-specific.
+- Requiring native scheduling or native transports to ship the baseline.
 - A new async API unrelated to asyncio; the target is drop-in asyncio
   compatibility.
 - Rewriting low-traffic Python APIs merely to maximize the amount of native
