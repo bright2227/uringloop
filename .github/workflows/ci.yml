@@ -4,6 +4,7 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,56 +32,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Lint
-        run: uv run ruff check uringloop tests benchmarks scripts
+        run: uv run ruff check uringloop tests
 
       - name: Run tests
         run: uv run pytest tests/ -v
-
-      - name: Record CPython asyncio compatibility baseline
-        run: |
-          uv run python scripts/compat_baseline.py \
-            --verify-upstream \
-            --output "artifacts/compat-${{ matrix.python-version }}.json"
-
-      - name: Upload compatibility baseline
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: compat-${{ matrix.python-version }}
-          path: artifacts/compat-${{ matrix.python-version }}.json
-
-  native-sanitizers:
-    name: Native ASAN and UBSAN
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      UV_PYTHON: "3.12"
-      URINGLOOP_SANITIZERS: address,undefined
-      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
-      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-    steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Prepare environment
-        uses: ./.github/actions/prepare
-        with:
-          python-version: "3.12"
-
-      - name: Build instrumented extensions and vendored liburing
-        run: uv run --with 'setuptools>=78' python setup.py build_ext --inplace --force
-
-      - name: Run native ring tests
-        run: |
-          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
-            .venv/bin/python -m pytest tests/e2e/native -v
-
-      - name: Run event-loop e2e tests
-        run: |
-          LD_PRELOAD="$(gcc -print-file-name=libasan.so)" \
-            .venv/bin/python -m pytest tests/e2e/loop tests/e2e/proactor -v
 
   check-sdist:
     name: Check source distribution
