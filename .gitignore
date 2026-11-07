@@ -18,4 +18,3 @@ _liburing.o
 _liburing.*.so
 _uringcore.*.so
 _uringcore_liburing.*.so
-_native_handle_prototypes.*.so

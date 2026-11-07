@@ -1,5 +1,4 @@
 include _ffi_build.py
-include ROADMAP.md
 include libs/LICENSE
 include libs/Makefile.common
 include libs/Makefile.quiet
@@ -7,7 +6,6 @@ include libs/configure
 include libs/liburing.spec
 include libs/src/Makefile
 include src/uringcore_liburing.c
-include THIRD_PARTY_LICENSES/CPython-PSF-2.0.txt
 include THIRD_PARTY_LICENSES/liburing-MIT.txt
 recursive-include libs/src *.c
 include libs/src/int_flags.h
@@ -18,9 +16,6 @@ include libs/src/include/liburing.h
 include libs/src/include/liburing/barrier.h
 include libs/src/include/liburing/io_uring.h
 recursive-include docs *.md
-recursive-include benchmarks *.py *.json *.c
-recursive-include scripts *.py
-recursive-include tests/compat *.py *.md *.json
 recursive-include uringloop *.py *.pyi
 include uringloop/py.typed
 exclude uringloop/_liburing.c
